@@ -16,6 +16,7 @@ package gossh
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,9 +34,10 @@ import (
 func TestReverseTunnel(t *testing.T) {
 	testName := "TestReverseTunnel"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -43,24 +45,26 @@ func TestReverseTunnel(t *testing.T) {
 	}
 
 	// starting openssh container without password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20031,
+		LocalPort:  20031,
 		SudoAccess: true,
-	})
-	err = container.WriteConfig()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
+
+	err = container.WriteConfig()
+	require.NoError(t, err)
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -79,10 +83,8 @@ func TestReverseTunnel(t *testing.T) {
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
-		container.RemoveConfig()
 	})
+
 	// we don't have /opt/deckhouse in the container, so we should create it before start any UploadScript with sudo
 	err = container.CreateDeckhouseDirs()
 	require.NoError(t, err)
@@ -102,15 +104,15 @@ func TestReverseTunnel(t *testing.T) {
 			},
 			{
 				title:   "Invalid address",
-				address: "22050:127.0.0.1:2222",
+				address: fmt.Sprintf("22050:127.0.0.1:%s", container.RemotePortString()),
 				wantErr: true,
 				err:     "invalid address must be 'remote_bind:remote_port:local_bind:local_port'",
 			},
 			{
 				title:   "Invalid local bind",
-				address: "127.0.0.1:2222:127.0.0.1:22",
+				address: fmt.Sprintf("127.0.0.1:%s:127.0.0.1:22", container.RemotePortString()),
 				wantErr: true,
-				err:     "failed to listen remote on 127.0.0.1:2222",
+				err:     fmt.Sprintf("failed to listen remote on 127.0.0.1:%s", container.RemotePortString()),
 			},
 			{
 				title:       "Wrong local bind",
@@ -160,13 +162,13 @@ func TestReverseTunnel(t *testing.T) {
 		}{
 			{
 				title:    "Normal address",
-				address:  "127.0.0.1:2222:127.0.0.1:22050",
-				expected: "R:127.0.0.1:2222:127.0.0.1:22050",
+				address:  fmt.Sprintf("127.0.0.1:%s:127.0.0.1:22050", container.RemotePortString()),
+				expected: fmt.Sprintf("R:127.0.0.1:%s:127.0.0.1:22050", container.RemotePortString()),
 			},
 			{
 				title:    "Invalid address",
-				address:  "22050:127.0.0.1:2222",
-				expected: "R:22050:127.0.0.1:2222",
+				address:  fmt.Sprintf("22050:127.0.0.1:%s", container.RemotePortString()),
+				expected: fmt.Sprintf("R:22050:127.0.0.1:%s", container.RemotePortString()),
 			},
 			{
 				title:    "Remote FQDN",
@@ -183,8 +185,6 @@ func TestReverseTunnel(t *testing.T) {
 			})
 		}
 	})
-
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
 
 	t.Run("HealthMonitor test", func(t *testing.T) {
 		tun := NewReverseTunnel(sshClient, "127.0.0.1:8080:127.0.0.1:8088")
@@ -223,8 +223,6 @@ exit $?
 		err = container.Stop()
 		require.NoError(t, err)
 		time.Sleep(5 * time.Second)
-		err = container.WithNetwork("")
-		require.NoError(t, err)
 		err = container.Start()
 		require.NoError(t, err)
 		err = container.CreateDeckhouseDirs()

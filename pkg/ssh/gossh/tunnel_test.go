@@ -16,11 +16,13 @@ package gossh
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/deckhouse/lib-dhctl/pkg/log"
 	"github.com/stretchr/testify/require"
 
 	sshtesting "github.com/deckhouse/lib-connection/pkg/ssh/gossh/testing"
@@ -30,9 +32,10 @@ import (
 func TestTunnel(t *testing.T) {
 	testName := "TestTunnel"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -40,22 +43,23 @@ func TestTunnel(t *testing.T) {
 	}
 
 	// starting openssh container without password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20023,
+		LocalPort:  20023,
 		SudoAccess: true,
-	})
-	err = container.WriteConfig()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
+
+	err = container.WriteConfig()
+	require.NoError(t, err)
 
 	os.Setenv("SSH_AUTH_SOCK", "")
 	settings := session.NewSession(session.Input{
@@ -71,9 +75,6 @@ func TestTunnel(t *testing.T) {
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
-		container.RemoveConfig()
 	})
 
 	t.Run("Tunnel to container", func(t *testing.T) {
@@ -85,18 +86,18 @@ func TestTunnel(t *testing.T) {
 		}{
 			{
 				title:   "Tunnel, success",
-				address: "127.0.0.1:2222:127.0.0.1:22050",
+				address: fmt.Sprintf("127.0.0.1:%s:127.0.0.1:22050", container.RemotePortString()),
 				wantErr: false,
 			},
 			{
 				title:   "Invalid address",
-				address: "22050:127.0.0.1:2222",
+				address: fmt.Sprintf("22050:127.0.0.1:%s", container.RemotePortString()),
 				wantErr: true,
 				err:     "invalid address must be 'remote_bind:remote_port:local_bind:local_port'",
 			},
 			{
 				title:   "Invalid local bind",
-				address: "127.0.0.1:2222:127.0.0.1:22",
+				address: fmt.Sprintf("127.0.0.1:%s:127.0.0.1:22", container.RemotePortString()),
 				wantErr: true,
 				err:     "failed to listen local on 127.0.0.1:22",
 			},
@@ -134,9 +135,10 @@ func TestTunnel(t *testing.T) {
 func TestHealthMonitor(t *testing.T) {
 	testName := "TestTunnelHealthMonitor"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -144,24 +146,26 @@ func TestHealthMonitor(t *testing.T) {
 	}
 
 	// starting openssh container without password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20031,
+		LocalPort:  20031,
 		SudoAccess: true,
+	}, testName)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
 	})
+
 	err = container.WriteConfig()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -177,7 +181,7 @@ func TestHealthMonitor(t *testing.T) {
 		sshClient.Stop()
 		container.Stop()
 		os.Remove(path)
-		container.RemoveConfig()
+		container.RemoveSSHDConfig()
 	})
 	t.Run("Dial to unreacheble host", func(t *testing.T) {
 		tun := NewTunnel(sshClient, "100.200.200.300:80:127.0.0.1:8080")
@@ -209,13 +213,13 @@ func TestHealthMonitor(t *testing.T) {
 		}{
 			{
 				title:    "Normal address",
-				address:  "127.0.0.1:2222:127.0.0.1:22050",
-				expected: "L:127.0.0.1:2222:127.0.0.1:22050",
+				address:  fmt.Sprintf("127.0.0.1:%s:127.0.0.1:22050", container.RemotePortString()),
+				expected: fmt.Sprintf("L:127.0.0.1:%s:127.0.0.1:22050", container.RemotePortString()),
 			},
 			{
 				title:    "Invalid address",
-				address:  "22050:127.0.0.1:2222",
-				expected: "L:22050:127.0.0.1:2222",
+				address:  fmt.Sprintf("22050:127.0.0.1:%s", container.RemotePortString()),
+				expected: fmt.Sprintf("L:22050:127.0.0.1:%s", container.RemotePortString()),
 			},
 			{
 				title:    "Remote FQDN",
@@ -228,7 +232,6 @@ func TestHealthMonitor(t *testing.T) {
 			t.Run(c.title, func(t *testing.T) {
 				tun := NewTunnel(sshClient, c.address)
 				require.Equal(t, c.expected, tun.String())
-
 			})
 		}
 	})

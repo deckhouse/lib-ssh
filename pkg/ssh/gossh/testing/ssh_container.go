@@ -15,6 +15,7 @@
 package ssh_testing
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/deckhouse/lib-dhctl/pkg/log"
+	"github.com/deckhouse/lib-dhctl/pkg/retry"
+)
+
+const (
+	tmpGlobalDirName = "test-lib-connection"
+	dockerNamePrefix = "test_lib_connection"
 )
 
 type ContainerSettings struct {
@@ -30,68 +39,293 @@ type ContainerSettings struct {
 	Password      string
 	Username      string
 	NodeTmpPath   string
-	Port          int
+	LocalPort     int
 	SudoAccess    bool
 }
 
-func (s ContainerSettings) PortString() string {
-	return strconv.Itoa(s.Port)
+func (s ContainerSettings) LocalPortString() string {
+	return strconv.Itoa(s.LocalPort)
 }
 
 type SSHContainer struct {
-	settings   ContainerSettings
-	id         string
-	IP         string
-	configPath string
-	network    string
+	settings       ContainerSettings
+	id             string
+	ip             string
+	sshdConfigPath string
+	network        string
+	testName       string
+	testID         string
+	localTmpDir    string
 }
 
-func NewSSHContainer(settings ContainerSettings) *SSHContainer {
+func NewSSHContainer(settings ContainerSettings, testName string) (*SSHContainer, error) {
 	if settings.NodeTmpPath == "" {
-		settings.NodeTmpPath = "/tmp"
+		settings.NodeTmpPath = "/opt/deckhouse/tmp"
 	}
 
-	return &SSHContainer{
-		settings: settings,
+	if settings.LocalPort <= 0 {
+		settings.LocalPort = randRange(22000, 29999)
 	}
+
+	id := testID(testName)
+
+	c := &SSHContainer{
+		settings: settings,
+		testName: testName,
+		testID:   id,
+	}
+
+	localTmpDirStr := filepath.Join(os.TempDir(), tmpGlobalDirName, id)
+	err := os.MkdirAll(localTmpDirStr, 0777)
+	if err != nil {
+		return nil, c.wrapError("failed to create local tmp dir %s: %v", localTmpDirStr, err)
+	}
+	localTmpDir, err := os.MkdirTemp(localTmpDirStr, "ssh")
+	if err != nil {
+		return nil, c.wrapError("failed to create temporary local tmp dir %s: %v", localTmpDirStr, err)
+	}
+	c.localTmpDir = localTmpDir
+
+	return c, nil
+}
+
+// force AllowTcpForwarding yes to allow connection throufh bastion
+func (c *SSHContainer) WriteConfig() error {
+	conf, err := os.CreateTemp(c.localTmpDir, "sshd_config")
+	if err != nil {
+		return err
+	}
+
+	passwordAuthEnabled := "no"
+	if len(c.ContainerSettings().Password) > 0 {
+		passwordAuthEnabled = "yes"
+	}
+
+	configTpl := `
+Port %s
+AuthorizedKeysFile	.ssh/authorized_keys
+AllowTcpForwarding yes
+GatewayPorts no
+X11Forwarding no
+PidFile /config/sshd.pid
+Subsystem	sftp	internal-sftp
+PasswordAuthentication %s
+`
+	config := fmt.Sprintf(configTpl, c.RemotePortString(), passwordAuthEnabled)
+
+	_, err = conf.WriteString(config)
+	c.sshdConfigPath = conf.Name()
+	return err
+}
+
+func (c *SSHContainer) RemoveSSHDConfig() error {
+	path := c.GetSSHDConfigPath()
+	if path == "" {
+		return nil
+	}
+
+	if err := os.Remove(path); err != nil {
+		return c.wrapError("failed to remove config file: %v", err)
+	}
+
+	return nil
+}
+
+func (c *SSHContainer) Start() error {
+	err := c.createNetwork()
+	if err != nil {
+		return err
+	}
+
+	cmd := append([]string{"run"}, c.runContainerArgs()...)
+
+	id, err := c.runDockerWithOut("start container", cmd...)
+	if err != nil {
+		loopParams := defaultRetryParams(fmt.Sprintf("Remove network %s after fail run container", c.GetNetwork()))
+		removeNetworkErr := retry.NewLoopWithParams(loopParams).Run(func() error {
+			return c.removeNetwork()
+		})
+		if removeNetworkErr != nil {
+			err = c.wrapError("%v and failed to remove network %s: %v", err, c.GetNetwork(), removeNetworkErr)
+		}
+
+		return err
+	}
+
+	c.id = strings.TrimSpace(id)
+
+	c.ip, err = c.discoveryContainerIP()
+	if err != nil {
+		if stopErr := c.Stop(); stopErr != nil {
+			err = c.wrapError("%v and cannot cleanup: %v", err, stopErr)
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (c *SSHContainer) Stop() error {
+	resError := ""
+	if err := c.stopContainer(); err != nil {
+		resError = err.Error()
+	}
+
+	if err := c.removeNetwork(); err != nil {
+		resError = fmt.Sprintf("%s/%s", resError, err.Error())
+	}
+
+	if resError != "" {
+		return errors.New(resError)
+	}
+
+	return nil
+}
+
+func (c *SSHContainer) Disconnect() error {
+	return c.runDockerNetworkConnect(false)
+}
+
+func (c *SSHContainer) Connect() error {
+	return c.runDockerNetworkConnect(true)
+}
+
+func (c *SSHContainer) ExecToContainer(description string, command ...string) error {
+	if err := c.isContainerStarted(description); err != nil {
+		return err
+	}
+
+	args := append([]string{"exec", c.GetContainerId()}, command...)
+
+	return c.runDocker(description, args...)
+}
+
+func (c *SSHContainer) CreateDeckhouseDirs() error {
+	description := func(name string) string {
+		d := "node tmp dir"
+		if name == "" {
+			return d
+		}
+
+		return fmt.Sprintf("%s %s", d, name)
+	}
+
+	nodeTmpPath := c.ContainerSettings().NodeTmpPath
+
+	if nodeTmpPath == "" {
+		return c.wrapError("cannot create %s. Path is empty", description(""))
+	}
+
+	if err := c.ExecToContainer(description("create"), "mkdir", "-p", nodeTmpPath); err != nil {
+		return err
+	}
+
+	return c.ExecToContainer(description("set mode"), "chmod", "-R", "777", nodeTmpPath)
+}
+
+func (c *SSHContainer) GetContainerId() string {
+	return c.id
+}
+
+func (c *SSHContainer) GetNetwork() string {
+	return c.network
+}
+
+func (c *SSHContainer) GetContainerIP() string {
+	return c.ip
+}
+
+func (c *SSHContainer) GetSSHDConfigPath() string {
+	return c.sshdConfigPath
 }
 
 func (c *SSHContainer) ContainerSettings() ContainerSettings {
 	return c.settings
 }
 
-func (c *SSHContainer) Cmd() (args []string) {
-	args = []string{"run", "-d", "-e", "USER_NAME=" + c.settings.Username, "-p", strconv.Itoa(c.settings.Port) + ":2222"}
-	if len(c.network) > 0 {
-		args = append(args, "--network")
-		args = append(args, c.network)
+func (c *SSHContainer) RemotePortString() string {
+	return "2222"
+}
+
+func (c *SSHContainer) dockerName() string {
+	return fmt.Sprintf("%s_%s", dockerNamePrefix, c.testID)
+}
+
+func (c *SSHContainer) runDockerWithOut(description string, command ...string) (string, error) {
+	if len(command) == 0 {
+		return "", c.wrapError("%s: docker command is empty", description)
 	}
-	if len(c.settings.PublicKey) > 0 {
-		args = append(args, "-e")
-		args = append(args, "PUBLIC_KEY="+c.settings.PublicKey)
+
+	cmd := exec.Command("docker", command...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", c.wrapError("cannot run docker %s: '%v', output: %s", description, err, string(out))
 	}
-	if len(c.settings.PublicKeyPath) > 0 {
+
+	return string(out), nil
+}
+
+func (c *SSHContainer) runDocker(description string, command ...string) error {
+	_, err := c.runDockerWithOut(description, command...)
+	return err
+}
+
+func (c *SSHContainer) wrapError(format string, args ...any) error {
+	f := c.testName + ": " + format
+	return fmt.Errorf(f, args...)
+}
+
+func (c *SSHContainer) isContainerStarted(description string) error {
+	if c.GetContainerId() != "" {
+		return nil
+	}
+
+	return c.wrapError("%s: container seems to be not started. Call Start() first", description)
+}
+
+func (c *SSHContainer) runContainerArgs() []string {
+	settings := c.ContainerSettings()
+
+	ports := fmt.Sprintf("%d:%s", settings.LocalPort, c.RemotePortString())
+	name := c.dockerName()
+	args := []string{
+		"-d",
+		"-e", "USER_NAME=" + settings.Username,
+		"-p", ports,
+		"--name", name,
+		"--network", c.GetNetwork(),
+	}
+
+	if len(settings.PublicKey) > 0 {
 		args = append(args, "-e")
-		args = append(args, "PUBLIC_KEY_FILE="+c.settings.PublicKeyPath)
+		args = append(args, "PUBLIC_KEY="+settings.PublicKey)
+	}
+	if len(settings.PublicKeyPath) > 0 {
+		args = append(args, "-e")
+		args = append(args, "PUBLIC_KEY_FILE="+settings.PublicKeyPath)
 	}
 	// set default password if no auth methods present
-	if len(c.settings.PublicKey) == 0 && len(c.settings.PublicKeyPath) == 0 && len(c.settings.Password) == 0 {
+	if len(settings.PublicKey) == 0 && len(settings.PublicKeyPath) == 0 && len(settings.Password) == 0 {
 		c.settings.Password = "password"
 	}
-	if len(c.settings.Password) > 0 {
+
+	settings = c.ContainerSettings()
+
+	if len(settings.Password) > 0 {
 		args = append(args, "-e")
 		args = append(args, "PASSWORD_ACCESS=true")
 		args = append(args, "-e")
-		args = append(args, "USER_PASSWORD="+c.settings.Password)
+		args = append(args, "USER_PASSWORD="+settings.Password)
 	}
 	args = append(args, "-e")
-	args = append(args, "SUDO_ACCESS="+fmt.Sprintf("%v", c.settings.SudoAccess))
+	args = append(args, "SUDO_ACCESS="+fmt.Sprintf("%v", settings.SudoAccess))
 	args = append(args, "--restart")
 	args = append(args, "unless-stopped")
 
-	if c.configPath != "" {
+	sshdConfigPath := c.GetSSHDConfigPath()
+	if sshdConfigPath != "" {
 		args = append(args, "-v")
-		args = append(args, c.configPath+":/config/sshd/sshd_config")
+		args = append(args, sshdConfigPath+":/config/sshd/sshd_config")
 	}
 
 	image := os.Getenv("DHCTL_TESTS_OPENSSH_IMAGE")
@@ -101,174 +335,135 @@ func (c *SSHContainer) Cmd() (args []string) {
 
 	args = append(args, image)
 
-	return
+	return args
 }
 
-func (c *SSHContainer) String() string {
-	cmd := "docker " + strings.Join(c.Cmd(), " ")
-	return cmd
-}
-
-// force AllowTcpForwarding yes to allow connection throufh bastion
-func (c *SSHContainer) WriteConfig() error {
-	tmpDir, err := os.MkdirTemp(".", "sshd")
-	if err != nil {
-		return err
-	}
-	conf, err := os.CreateTemp(tmpDir, "sshd_config")
-	if err != nil {
-		return err
-	}
-	config := `Port 2222
-AuthorizedKeysFile	.ssh/authorized_keys
-`
-	if len(c.settings.Password) > 0 {
-		config = config + `PasswordAuthentication yes`
-	} else {
-		config = config + `PasswordAuthentication no`
-	}
-	config = config + `
-AllowTcpForwarding yes
-GatewayPorts no
-X11Forwarding no
-PidFile /config/sshd.pid
-Subsystem	sftp	internal-sftp
-`
-
-	_, err = conf.WriteString(config)
-	c.configPath = conf.Name()
-	return err
-}
-
-func (c *SSHContainer) RemoveConfig() error {
-	path := filepath.Dir(c.configPath)
-	return os.RemoveAll(path)
-}
-
-func (c *SSHContainer) Start() error {
-	args := c.Cmd()
-	cmd := exec.Command("docker", args...)
-	idBytes, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("error: %v, output: %s", err, string(idBytes))
-	}
-	c.id = strings.TrimSpace(string(idBytes))
-	time.Sleep(2 * time.Second)
-	cmd = exec.Command("docker", "inspect", "-f", "'{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}'", c.id)
-	ip, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("error: %v, output: %s", err, string(ip))
-	}
-	c.IP = strings.TrimSpace(string(ip))
-	c.IP = strings.ReplaceAll(c.IP, "'", "")
-
-	return nil
-}
-
-func (c *SSHContainer) Stop() error {
-	if c.id != "" {
-		cmd := exec.Command("docker", "stop", c.id)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("error: %v, output: %s", err, string(out))
-		}
-		cmd = exec.Command("docker", "rm", c.id)
-		out, err = cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("error: %v, output: %s", err, string(out))
-		}
-		c.id = ""
-		if c.network != "" {
-			cmd = exec.Command("docker", "network", "rm", c.network)
-			out, err = cmd.CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("error: %v, output: %s", err, string(out))
-			}
-			c.network = ""
-		}
-	}
-	return nil
-}
-
-func (c *SSHContainer) GetId() string {
-	return c.id
-}
-
-func (c *SSHContainer) GetConfigPath() string {
-	return c.configPath
-}
-
-func (c *SSHContainer) CreateDeckhouseDirs() error {
-	if c.id == "" {
-		return fmt.Errorf("container seems to be not started. Call Start() first")
-	}
-	cmd := exec.Command("docker", "exec", c.id, "mkdir", "-p", c.settings.NodeTmpPath)
-	err := cmd.Run()
-	if err != nil {
-		return err
-	}
-	cmd = exec.Command("docker", "exec", c.id, "chmod", "-R", "777", c.settings.NodeTmpPath)
-	err = cmd.Run()
-
-	return err
-}
-
-func (c *SSHContainer) WithNetwork(name string) error {
-	if c.id != "" {
-		return fmt.Errorf("could not be used with running container")
-	}
-
-	if c.network != "" {
-		// network already exists. just return
+func (c *SSHContainer) stopContainer() error {
+	if err := c.isContainerStarted("stop container"); err == nil {
 		return nil
 	}
 
-	if len(name) == 0 {
-		name = "dhctl-test"
+	description := func(name string) string {
+		return fmt.Sprintf("%s %s", name, c.GetContainerId())
 	}
 
-	cmd := exec.Command("docker", "network", "create", name)
-	err := cmd.Run()
-	if err != nil {
+	if err := c.runDocker(description("stop container"), "stop", c.GetContainerId()); err != nil {
 		return err
 	}
-	c.network = name
+
+	return c.runDocker(description("remove container"), "rm", c.GetContainerId())
+}
+
+func (c *SSHContainer) isNetworkCreated(description string) error {
+	if c.GetNetwork() != "" {
+		return nil
+	}
+
+	return c.wrapError("%s: docker network is not created. Container seems to be not connected to named bridge", description)
+}
+
+func (c *SSHContainer) createNetwork() error {
+	if err := c.isContainerStarted("create network"); err == nil {
+		return c.wrapError("container %s is already running", c.GetContainerId())
+	}
+
+	if err := c.isNetworkCreated("create network"); err == nil {
+		return c.wrapError("network %s is already created", c.GetContainerId())
+	}
+
+	network := c.dockerName()
+
+	if err := c.runDocker(fmt.Sprintf("create network %s", network), "network", "create", network); err != nil {
+		return err
+	}
+
+	c.network = network
 
 	return nil
 }
 
-func (c *SSHContainer) Disconnect() error {
-	if c.id == "" {
-		return fmt.Errorf("container seems to be not started. Call Start() first")
+func (c *SSHContainer) removeNetwork() error {
+	if err := c.isNetworkCreated("remove network"); err != nil {
+		return nil
 	}
 
-	if c.network == "" {
-		return fmt.Errorf("container seems to be not connected to named bridge. Call WithNetwork() first")
+	network := c.GetNetwork()
+
+	if err := c.runDocker(fmt.Sprintf("remove network %s", network), "network", "rm", network); err != nil {
+		return err
 	}
 
-	cmd := exec.Command("docker", "network", "disconnect", c.network, c.id)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("error: %v, output: %s", err, string(out))
-	}
+	c.network = ""
 
 	return nil
 }
 
-func (c *SSHContainer) Connect() error {
-	if c.id == "" {
-		return fmt.Errorf("container seems to be not started. Call Start() first")
+func (c *SSHContainer) runDockerNetworkConnect(isDisconnect bool) error {
+	cmdName := "connect"
+	if isDisconnect {
+		cmdName = "disconnect"
 	}
 
-	if c.network == "" {
-		return fmt.Errorf("container seems to be not connected to named bridge. Call WithNetwork() first")
+	description := fmt.Sprintf("network %s", cmdName)
+
+	if err := c.isContainerStarted(description); err != nil {
+		return err
 	}
 
-	cmd := exec.Command("docker", "network", "connect", c.network, c.id)
-	out, err := cmd.CombinedOutput()
+	if err := c.isNetworkCreated(description); err != nil {
+		return err
+	}
+
+	return c.runDocker(cmdName, "network", cmdName, c.GetNetwork(), c.GetContainerId())
+}
+
+func (c *SSHContainer) discoveryContainerIP() (string, error) {
+	description := "Getting IP address of container"
+	if err := c.isNetworkCreated(description); err != nil {
+		return "", err
+	}
+
+	if err := c.isContainerStarted(description); err != nil {
+		return "", err
+	}
+
+	getIPLoopParams := defaultRetryParams(fmt.Sprintf(" %s", c.GetContainerId()))
+	getIPCmd := []string{
+		"inspect",
+		"-f", "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+		c.GetContainerId(),
+	}
+
+	ip := ""
+
+	err := retry.NewLoopWithParams(getIPLoopParams).Run(func() error {
+		ipFromRun, err := c.runDockerWithOut(description, getIPCmd...)
+		if err != nil {
+			return err
+		}
+
+		ipFromRun = strings.TrimSpace(ipFromRun)
+		if ipFromRun == "" {
+			return errors.New("container IP is empty")
+		}
+
+		ip = ipFromRun
+
+		return nil
+	})
+
 	if err != nil {
-		return fmt.Errorf("error: %v, output: %s", err, string(out))
+		return "", err
 	}
 
-	return nil
+	return ip, nil
+}
+
+func defaultRetryParams(name string) retry.Params {
+	return retry.NewEmptyParams(
+		retry.WithName(name),
+		retry.WithAttempts(5),
+		retry.WithWait(3*time.Second),
+		retry.WithLogger(log.NewSimpleLogger(log.LoggerOptions{})),
+	)
 }
