@@ -18,14 +18,22 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/pem"
 	"fmt"
 	"io"
+	mathrand "math/rand"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"testing"
+	"time"
 
+	"github.com/deckhouse/lib-dhctl/pkg/log"
 	gossh "github.com/deckhouse/lib-gossh"
+	"github.com/name212/govalue"
+	"github.com/stretchr/testify/require"
 )
 
 // helper func to generate SSH keys
@@ -199,4 +207,101 @@ func StartWebServer(port string) error {
 		return err
 	}
 	return nil
+}
+
+func randRange(min, max int) int {
+	rnd := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
+	return rnd.Intn(max-min) + min
+}
+
+func testID(name string) string {
+	rndID := mathrand.New(mathrand.NewSource(time.Now().UnixNano())).Int()
+	sumString := fmt.Sprintf("%s/%d", name, rndID)
+	sum := sha256Encode(sumString)
+	return fmt.Sprintf("%.12s", sum)
+}
+
+func sha256Encode(input string) string {
+	hasher := sha256.New()
+
+	hasher.Write([]byte(input))
+
+	return fmt.Sprintf("%x", hasher.Sum(nil))
+}
+
+func AddSSHKeyToAgent(t *testing.T, path string) string {
+	authSock := os.Getenv("SSH_AUTH_SOCK")
+	if authSock == "" {
+		return ""
+	}
+
+	// add key to agent
+	cmd := exec.Command("ssh-add", path)
+	err := cmd.Run()
+	require.NoError(t, err, "failed to add key '%s' to agent", path)
+
+	return authSock
+}
+
+func LogErrorOrAssert(t *testing.T, description string, err error, logger log.Logger) {
+	if err == nil {
+		return
+	}
+
+	if govalue.IsNil(logger) {
+		require.NoError(t, err, description)
+		return
+	}
+
+	logger.ErrorF("%s: %v", description, err)
+}
+
+func RemoveSSHKeyFromAgent(t *testing.T, path string, logger log.Logger) {
+	authSock := os.Getenv("SSH_AUTH_SOCK")
+	if authSock == "" {
+		return
+	}
+
+	cmd := exec.Command("ssh-add", "-d", path)
+	err := cmd.Run()
+
+	LogErrorOrAssert(t, fmt.Sprintf("failed to remove key '%s' from agent", path), err, logger)
+}
+
+func StopContainerAndRemoveKeys(t *testing.T, container *SSHContainer, logger log.Logger, keyPaths ...string) {
+	containerStopError := container.Stop()
+	removeSSHDConfigError := container.RemoveSSHDConfig()
+	removeErrors := removeFiles(keyPaths...)
+
+	LogErrorOrAssert(t, "failed to stop container", containerStopError, logger)
+	LogErrorOrAssert(t, "remove sshd config", removeSSHDConfigError, logger)
+	for _, removeError := range removeErrors {
+		LogErrorOrAssert(t, "failed to remove private key", removeError, logger)
+	}
+}
+
+func RemoveFiles(t *testing.T, logger log.Logger, paths ...string) {
+	removeErrors := removeFiles(paths...)
+
+	for _, removeError := range removeErrors {
+		LogErrorOrAssert(t, "failed to remove private key", removeError, logger)
+	}
+}
+
+func CheckSkipSSHTest(t *testing.T, testName string) {
+	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
+		t.Skipf("Skipping %s test", testName)
+	}
+}
+
+func removeFiles(paths ...string) []error {
+	removeErrors := make([]error, 0, len(paths))
+	for _, path := range paths {
+		err := os.Remove(path)
+		if err != nil && !os.IsNotExist(err) {
+			removeErrors = append(removeErrors, err)
+		}
+	}
+
+	return removeErrors
 }

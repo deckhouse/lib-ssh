@@ -18,10 +18,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"testing"
 	"time"
 
+	"github.com/deckhouse/lib-dhctl/pkg/log"
 	"github.com/stretchr/testify/require"
 
 	connection "github.com/deckhouse/lib-connection/pkg"
@@ -30,6 +30,8 @@ import (
 )
 
 func TestOnlyPreparePrivateKeys(t *testing.T) {
+	sshtesting.CheckSkipSSHTest(t, "TestOnlyPreparePrivateKeys")
+
 	// genetaring ssh keys
 	path, _, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -45,11 +47,12 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 		return
 	}
 
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	t.Cleanup(func() {
-		os.Remove(path)
-		os.Remove(tmpFile.Name())
-		os.Remove(keyWithPass)
+		sshtesting.RemoveFiles(t, logger, path, tmpFile.Name(), keyWithPass)
 	})
+
 	t.Run("OnlyPrepareKeys cases", func(t *testing.T) {
 		cases := []struct {
 			title    string
@@ -149,9 +152,10 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 func TestClientStart(t *testing.T) {
 	testName := "TestClientStart"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -159,63 +163,58 @@ func TestClientStart(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Password:   "VeryStrongPasswordWhatCannotBeGuessed",
 		Username:   "user",
-		Port:       20022,
+		LocalPort:  20022,
 		SudoAccess: true,
-	})
+	}, "client start")
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
 
 	// starting openssh container (bastion) with key auth and AllowTcpForwarding yes in config
-	bastion := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	bastion, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Password:   "VeryStrongPasswordWhatCannotBeGuessed",
 		Username:   "bastionuser",
-		Port:       20023,
+		LocalPort:  20023,
 		SudoAccess: true,
-	})
+		// cannot start test w/o config file
+		// cannot start test w/o container
+	}, "client start bastion")
+	require.NoError(t, err)
+
 	err = bastion.WriteConfig()
 	if err != nil {
-		// cannot start test w/o config file
 		return
 	}
 	err = bastion.Start()
 	if err != nil {
-		// cannot start test w/o container
 		return
 	}
-	auth_sock := os.Getenv("SSH_AUTH_SOCK")
-	if auth_sock != "" {
-		// add key to agent
-		cmd := exec.Command("ssh-add", path)
-		cmd.Run()
-	}
+
+	authSock := sshtesting.AddSSHKeyToAgent(t, path)
 
 	t.Cleanup(func() {
-		container.Stop()
-		bastion.Stop()
-		if auth_sock != "" {
-			cmd := exec.Command("ssh-add", "-d", path)
-			cmd.Run()
-		}
-		os.Remove(path)
-		bastion.RemoveConfig()
+		sshtesting.StopContainerAndRemoveKeys(t, bastion, logger)
+		sshtesting.RemoveSSHKeyFromAgent(t, path, logger)
 	})
 
 	t.Run("Start ssh client", func(t *testing.T) {
 		cases := []struct {
-			title     string
-			settings  *session.Session
-			keys      []session.AgentPrivateKey
-			wantErr   bool
-			err       string
-			auth_sock string
+			title    string
+			settings *session.Session
+			keys     []session.AgentPrivateKey
+			wantErr  bool
+			err      string
+			authSock string
 		}{
 			{
 				title: "Password auth, no keys",
@@ -242,9 +241,9 @@ func TestClientStart(t *testing.T) {
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022"}),
-				keys:      []session.AgentPrivateKey{{Key: path}},
-				wantErr:   false,
-				auth_sock: auth_sock,
+				keys:     []session.AgentPrivateKey{{Key: path}},
+				wantErr:  false,
+				authSock: authSock,
 			},
 			{
 				title: "SSH_AUTH_SOCK auth, wrong socket",
@@ -252,10 +251,10 @@ func TestClientStart(t *testing.T) {
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022"}),
-				keys:      make([]session.AgentPrivateKey, 0, 1),
-				wantErr:   true,
-				err:       "Failed to open SSH_AUTH_SOCK",
-				auth_sock: "/run/nonexistent",
+				keys:     make([]session.AgentPrivateKey, 0, 1),
+				wantErr:  true,
+				err:      "Failed to open SSH_AUTH_SOCK",
+				authSock: "/run/nonexistent",
 			},
 			{
 				title: "Key auth, no password, wrong key",
@@ -279,10 +278,10 @@ func TestClientStart(t *testing.T) {
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022"}),
-				keys:      make([]session.AgentPrivateKey, 0, 1),
-				wantErr:   true,
-				err:       "one of SSH keys, SSH_AUTH_SOCK environment variable or become password should be not empty",
-				auth_sock: "",
+				keys:     make([]session.AgentPrivateKey, 0, 1),
+				wantErr:  true,
+				err:      "one of SSH keys, SSH_AUTH_SOCK environment variable or become password should be not empty",
+				authSock: "",
 			},
 			{
 				title: "Wrong port",
@@ -290,106 +289,106 @@ func TestClientStart(t *testing.T) {
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20021"}),
-				keys:      []session.AgentPrivateKey{{Key: path}},
-				wantErr:   true,
-				err:       "Failed to connect to master host",
-				auth_sock: "",
+				keys:     []session.AgentPrivateKey{{Key: path}},
+				wantErr:  true,
+				err:      "Failed to connect to master host",
+				authSock: "",
 			},
 			{
 				title: "With bastion, key auth",
 				settings: session.NewSession(session.Input{
-					AvailableHosts: []session.Host{{Host: container.IP, Name: container.IP}},
+					AvailableHosts: []session.Host{{Host: container.GetContainerIP(), Name: container.GetContainerIP()}},
 					User:           "user",
-					Port:           "2222",
+					Port:           container.RemotePortString(),
 					BastionHost:    "localhost",
-					BastionPort:    bastion.ContainerSettings().PortString(),
+					BastionPort:    bastion.ContainerSettings().LocalPortString(),
 					BastionUser:    bastion.ContainerSettings().Username,
 				}),
-				keys:      []session.AgentPrivateKey{{Key: path}},
-				wantErr:   false,
-				auth_sock: "",
+				keys:     []session.AgentPrivateKey{{Key: path}},
+				wantErr:  false,
+				authSock: "",
 			},
 			{
 				title: "With bastion, password auth",
 				settings: session.NewSession(session.Input{
-					AvailableHosts:  []session.Host{{Host: container.IP, Name: container.IP}},
+					AvailableHosts:  []session.Host{{Host: container.GetContainerIP(), Name: container.GetContainerIP()}},
 					User:            "user",
-					Port:            "2222",
+					Port:            container.RemotePortString(),
 					BecomePass:      "VeryStrongPasswordWhatCannotBeGuessed",
 					BastionHost:     "localhost",
-					BastionPort:     bastion.ContainerSettings().PortString(),
+					BastionPort:     bastion.ContainerSettings().LocalPortString(),
 					BastionUser:     bastion.ContainerSettings().Username,
 					BastionPassword: "VeryStrongPasswordWhatCannotBeGuessed",
 				}),
-				keys:      make([]session.AgentPrivateKey, 0, 1),
-				wantErr:   false,
-				auth_sock: "",
+				keys:     make([]session.AgentPrivateKey, 0, 1),
+				wantErr:  false,
+				authSock: "",
 			},
 			{
 				title: "With bastion, no auth",
 				settings: session.NewSession(session.Input{
-					AvailableHosts: []session.Host{{Host: container.IP, Name: container.IP}},
+					AvailableHosts: []session.Host{{Host: container.GetContainerIP(), Name: container.GetContainerIP()}},
 					User:           "user",
-					Port:           "2222",
+					Port:           container.RemotePortString(),
 					BecomePass:     "VeryStrongPasswordWhatCannotBeGuessed",
 					BastionHost:    "localhost",
-					BastionPort:    bastion.ContainerSettings().PortString(),
+					BastionPort:    bastion.ContainerSettings().LocalPortString(),
 					BastionUser:    bastion.ContainerSettings().Username,
 				}),
-				keys:      make([]session.AgentPrivateKey, 0, 1),
-				wantErr:   true,
-				err:       "No credentials present to connect to bastion host",
-				auth_sock: "",
+				keys:     make([]session.AgentPrivateKey, 0, 1),
+				wantErr:  true,
+				err:      "No credentials present to connect to bastion host",
+				authSock: "",
 			},
 			{
 				title: "With bastion, SSH_AUTH_SOCK auth",
 				settings: session.NewSession(session.Input{
-					AvailableHosts: []session.Host{{Host: container.IP, Name: container.IP}},
+					AvailableHosts: []session.Host{{Host: container.GetContainerIP(), Name: container.GetContainerIP()}},
 					User:           "user",
-					Port:           "2222",
+					Port:           container.RemotePortString(),
 					BastionHost:    "localhost",
-					BastionPort:    bastion.ContainerSettings().PortString(),
+					BastionPort:    bastion.ContainerSettings().LocalPortString(),
 					BastionUser:    bastion.ContainerSettings().Username,
 				}),
-				keys:      []session.AgentPrivateKey{{Key: path}},
-				wantErr:   false,
-				auth_sock: auth_sock,
+				keys:     []session.AgentPrivateKey{{Key: path}},
+				wantErr:  false,
+				authSock: authSock,
 			},
 			{
 				title: "With bastion, key auth, wrong target host",
 				settings: session.NewSession(session.Input{
-					AvailableHosts: []session.Host{{Host: container.IP, Name: container.IP}},
+					AvailableHosts: []session.Host{{Host: container.GetContainerIP(), Name: container.GetContainerIP()}},
 					User:           "user",
 					Port:           "20022",
 					BastionHost:    "localhost",
-					BastionPort:    bastion.ContainerSettings().PortString(),
+					BastionPort:    bastion.ContainerSettings().LocalPortString(),
 					BastionUser:    bastion.ContainerSettings().Username,
 				}),
-				keys:      []session.AgentPrivateKey{{Key: path}},
-				wantErr:   true,
-				err:       "Failed to connect to target host through bastion host",
-				auth_sock: "",
+				keys:     []session.AgentPrivateKey{{Key: path}},
+				wantErr:  true,
+				err:      "Failed to connect to target host through bastion host",
+				authSock: "",
 			},
 			{
 				title: "With bastion, key auth, wrong bastion port",
 				settings: session.NewSession(session.Input{
-					AvailableHosts: []session.Host{{Host: container.IP, Name: container.IP}},
+					AvailableHosts: []session.Host{{Host: container.GetContainerIP(), Name: container.GetContainerIP()}},
 					User:           "user",
-					Port:           "2222",
+					Port:           container.RemotePortString(),
 					BastionHost:    "localhost",
 					BastionPort:    "20021",
 					BastionUser:    bastion.ContainerSettings().Username,
 				}),
-				keys:      []session.AgentPrivateKey{{Key: path}},
-				wantErr:   true,
-				err:       "Could not connect to bastion host",
-				auth_sock: "",
+				keys:     []session.AgentPrivateKey{{Key: path}},
+				wantErr:  true,
+				err:      "Could not connect to bastion host",
+				authSock: "",
 			},
 		}
 
 		for _, c := range cases {
 			t.Run(c.title, func(t *testing.T) {
-				os.Setenv("SSH_AUTH_SOCK", c.auth_sock)
+				os.Setenv("SSH_AUTH_SOCK", c.authSock)
 				var sshClient *Client
 
 				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
@@ -413,9 +412,10 @@ func TestClientStart(t *testing.T) {
 func TestClientKeepalive(t *testing.T) {
 	testName := "TestClientKeepalive"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -423,23 +423,22 @@ func TestClientKeepalive(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
 		Password:   "VeryStrongPasswordWhatCannotBeGuessed",
-		Port:       20022,
+		LocalPort:  20022,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		container.Stop()
-		os.Remove(path)
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
 	})
+
 	os.Setenv("SSH_AUTH_SOCK", "")
 
 	t.Run("keepalive test", func(t *testing.T) {
@@ -509,11 +508,12 @@ func TestClientKeepalive(t *testing.T) {
 }
 
 func TestClientWithDebug(t *testing.T) {
-	testName := "TestClientKeepalive"
+	testName := "TestClientWithDebug"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -521,23 +521,22 @@ func TestClientWithDebug(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
 		Password:   "VeryStrongPasswordWhatCannotBeGuessed",
-		Port:       20042,
+		LocalPort:  20042,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		container.Stop()
-		os.Remove(path)
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
 	})
+
 	os.Setenv("SSH_AUTH_SOCK", "")
 
 	t.Run("start with debug test", func(t *testing.T) {
@@ -557,6 +556,8 @@ func TestClientWithDebug(t *testing.T) {
 }
 
 func TestDialContext(t *testing.T) {
+	sshtesting.CheckSkipSSHTest(t, "TestDialContext")
+
 	t.Run("client start with small context test", func(t *testing.T) {
 		settings := session.NewSession(session.Input{
 			AvailableHosts: []session.Host{{Host: "1.2.3.4", Name: "1.2.3.4"}},
@@ -581,6 +582,8 @@ func TestDialContext(t *testing.T) {
 }
 
 func TestClientLoop(t *testing.T) {
+	sshtesting.CheckSkipSSHTest(t, "TestClientLoop")
+
 	t.Run("SSH client Loop test", func(t *testing.T) {
 		settings := session.NewSession(session.Input{
 			AvailableHosts: []session.Host{{Host: "127.0.0.1", Name: "localhost"}, {Host: "127.0.0.2"}},
@@ -611,6 +614,8 @@ func TestClientLoop(t *testing.T) {
 }
 
 func TestClientSettings(t *testing.T) {
+	sshtesting.CheckSkipSSHTest(t, "TestClientSettings")
+
 	t.Run("SSH client settings test", func(t *testing.T) {
 		settings := session.NewSession(session.Input{
 			AvailableHosts: []session.Host{{Host: "127.0.0.1", Name: "localhost"}, {Host: "127.0.0.2"}},
@@ -626,6 +631,8 @@ func TestClientSettings(t *testing.T) {
 }
 
 func TestClientLive(t *testing.T) {
+	sshtesting.CheckSkipSSHTest(t, "TestClientLive")
+
 	t.Run("SSH client live test", func(t *testing.T) {
 		settings := session.NewSession(session.Input{
 			AvailableHosts: []session.Host{{Host: "127.0.0.1", Name: "localhost"}, {Host: "127.0.0.2"}},

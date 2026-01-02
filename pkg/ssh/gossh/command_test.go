@@ -31,9 +31,10 @@ import (
 func TestCommandOutput(t *testing.T) {
 	testName := "TestCommandOutput"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -41,19 +42,19 @@ func TestCommandOutput(t *testing.T) {
 	}
 
 	// starting openssh container without password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20027,
+		LocalPort:  20027,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -61,8 +62,7 @@ func TestCommandOutput(t *testing.T) {
 	keys := []session.AgentPrivateKey{{Key: path}}
 
 	t.Cleanup(func() {
-		container.Stop()
-		os.Remove(path)
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
 	})
 
 	t.Run("Get command Output", func(t *testing.T) {
@@ -188,9 +188,10 @@ func TestCommandOutput(t *testing.T) {
 func TestCommandCombinedOutput(t *testing.T) {
 	testName := "TestCommandCombinedOutput"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	os.Setenv("DHCTL_DEBUG", "yes")
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
@@ -199,19 +200,19 @@ func TestCommandCombinedOutput(t *testing.T) {
 	}
 
 	// starting openssh container without password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20028,
+		LocalPort:  20028,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -219,8 +220,7 @@ func TestCommandCombinedOutput(t *testing.T) {
 	keys := []session.AgentPrivateKey{{Key: path}}
 
 	t.Cleanup(func() {
-		container.Stop()
-		os.Remove(path)
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
 	})
 
 	t.Run("Get command CombinedOutput", func(t *testing.T) {
@@ -345,9 +345,10 @@ func TestCommandCombinedOutput(t *testing.T) {
 func TestCommandRun(t *testing.T) {
 	testName := "TestCommandRun"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -355,19 +356,19 @@ func TestCommandRun(t *testing.T) {
 	}
 
 	// starting openssh container without password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20028,
+		LocalPort:  20028,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -375,8 +376,7 @@ func TestCommandRun(t *testing.T) {
 	keys := []session.AgentPrivateKey{{Key: path}}
 
 	t.Cleanup(func() {
-		container.Stop()
-		os.Remove(path)
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
 	})
 
 	// evns test
@@ -509,9 +509,10 @@ func TestCommandRun(t *testing.T) {
 func TestCommandStart(t *testing.T) {
 	testName := "TestCommandStart"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -519,19 +520,19 @@ func TestCommandStart(t *testing.T) {
 	}
 
 	// starting openssh container without password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20029,
+		LocalPort:  20029,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -546,11 +547,8 @@ func TestCommandStart(t *testing.T) {
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
 	})
-
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
 
 	t.Run("Start and stop a command", func(t *testing.T) {
 		cases := []struct {
@@ -656,9 +654,10 @@ func TestCommandStart(t *testing.T) {
 func TestCommandSudoRun(t *testing.T) {
 	testName := "TestCommandSudoRun"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -666,33 +665,36 @@ func TestCommandSudoRun(t *testing.T) {
 	}
 
 	// starting openssh container without password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20030,
+		LocalPort:  20030,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
 
 	// starting openssh container with password auth
-	containerWithPass := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	containerWithPass, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20031,
+		LocalPort:  20031,
 		SudoAccess: true,
 		Password:   "VeryStrongPasswordWhatCannotBeGuessed",
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = containerWithPass.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -714,9 +716,7 @@ func TestCommandSudoRun(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		container.Stop()
-		containerWithPass.Stop()
-		os.Remove(path)
+		sshtesting.StopContainerAndRemoveKeys(t, containerWithPass, logger)
 	})
 
 	t.Run("Run a command with sudo", func(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/deckhouse/lib-connection/pkg/settings"
+	"github.com/deckhouse/lib-dhctl/pkg/log"
 	"github.com/stretchr/testify/require"
 
 	sshtesting "github.com/deckhouse/lib-connection/pkg/ssh/gossh/testing"
@@ -31,9 +32,10 @@ import (
 func TestSSHFileUpload(t *testing.T) {
 	testName := "TestSSHFileUpload"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -41,17 +43,20 @@ func TestSSHFileUpload(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   testName,
-		Port:       20020,
+		LocalPort:  20020,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
 
 	// creating direactory to upload
 	testDir := filepath.Join(os.TempDir(), "dhctltests", "upload")
@@ -81,6 +86,7 @@ func TestSSHFileUpload(t *testing.T) {
 	}
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -94,8 +100,6 @@ func TestSSHFileUpload(t *testing.T) {
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
 		os.RemoveAll(testDir)
 		os.Remove(symlink)
 	})
@@ -232,9 +236,10 @@ func TestSSHFileUpload(t *testing.T) {
 func TestSSHFileUploadBytes(t *testing.T) {
 	testName := "TestSSHFileUploadBytes"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -242,18 +247,23 @@ func TestSSHFileUploadBytes(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20020,
+		LocalPort:  20020,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
+
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -267,8 +277,6 @@ func TestSSHFileUploadBytes(t *testing.T) {
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
 	})
 
 	t.Run("Upload bytes", func(t *testing.T) {
@@ -288,6 +296,8 @@ func TestSSHFileUploadBytes(t *testing.T) {
 }
 
 func TestCreateEmptyTmpFile(t *testing.T) {
+	sshtesting.CheckSkipSSHTest(t, "TestCreateEmptyTmpFile")
+
 	t.Run("Creating empty temp file", func(t *testing.T) {
 		cases := []struct {
 			title      string
@@ -333,9 +343,10 @@ func TestCreateEmptyTmpFile(t *testing.T) {
 func TestSSHFileDownload(t *testing.T) {
 	testName := "TestSSHFileDownload"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -343,19 +354,23 @@ func TestSSHFileDownload(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20020,
+		LocalPort:  20020,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
 
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -389,8 +404,6 @@ func TestSSHFileDownload(t *testing.T) {
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
 		os.RemoveAll(testDir)
 	})
 	t.Run("Download files and directories to container via existing ssh client", func(t *testing.T) {
@@ -523,9 +536,10 @@ func TestSSHFileDownload(t *testing.T) {
 func TestSSHFileDownloadBytes(t *testing.T) {
 	testName := "TestSSHFileDownloadBytes"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -533,18 +547,23 @@ func TestSSHFileDownloadBytes(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20020,
+		LocalPort:  20020,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
+
 	os.Setenv("SSH_AUTH_SOCK", "")
+
 	settings := session.NewSession(session.Input{
 		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 		User:           "user",
@@ -562,8 +581,6 @@ func TestSSHFileDownloadBytes(t *testing.T) {
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
 	})
 
 	t.Run("Download bytes", func(t *testing.T) {
@@ -610,7 +627,5 @@ func TestSSHFileDownloadBytes(t *testing.T) {
 				}
 			})
 		}
-
 	})
-
 }

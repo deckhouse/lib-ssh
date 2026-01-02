@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/deckhouse/lib-dhctl/pkg/log"
 	"github.com/stretchr/testify/require"
 
 	sshtesting "github.com/deckhouse/lib-connection/pkg/ssh/gossh/testing"
@@ -29,9 +30,10 @@ import (
 func TestUploadScriptExecute(t *testing.T) {
 	testName := "TestUploadScriptExecute"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -39,17 +41,20 @@ func TestUploadScriptExecute(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20025,
+		LocalPort:  20025,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
 
 	// creating direactory to upload
 	testDir := filepath.Join(os.TempDir(), "dhctltests", "script")
@@ -93,8 +98,6 @@ fi
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
 		os.RemoveAll(testDir)
 	})
 	// we don't have /opt/deckhouse in the container, so we should create it before start any UploadScript with sudo
@@ -183,9 +186,10 @@ fi
 func TestUploadScriptExecuteBundle(t *testing.T) {
 	testName := "TestUploadScriptExecuteBundle"
 
-	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
-	}
+	sshtesting.CheckSkipSSHTest(t, testName)
+
+	logger := log.NewSimpleLogger(log.LoggerOptions{})
+
 	// genetaring ssh keys
 	path, publicKey, err := sshtesting.GenerateKeys("")
 	if err != nil {
@@ -193,17 +197,20 @@ func TestUploadScriptExecuteBundle(t *testing.T) {
 	}
 
 	// starting openssh container with password auth
-	container := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
+	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
 		PublicKey:  publicKey,
 		Username:   "user",
-		Port:       20026,
+		LocalPort:  20026,
 		SudoAccess: true,
-	})
+	}, testName)
+	require.NoError(t, err)
+
 	err = container.Start()
-	if err != nil {
-		// cannot start test w/o container
-		return
-	}
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
+	})
 
 	// creating direactory to upload
 	testDir := filepath.Join(os.TempDir(), "dhctltests")
@@ -229,8 +236,6 @@ func TestUploadScriptExecuteBundle(t *testing.T) {
 
 	t.Cleanup(func() {
 		sshClient.Stop()
-		container.Stop()
-		os.Remove(path)
 		os.RemoveAll(testDir)
 	})
 	// we don't have /opt/deckhouse in the container, so we should create it before start any UploadScript with sudo
