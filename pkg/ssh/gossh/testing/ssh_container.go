@@ -97,7 +97,7 @@ func (c *SSHContainer) WriteConfig() error {
 	}
 
 	passwordAuthEnabled := "no"
-	if len(c.ContainerSettings().Password) > 0 {
+	if c.ContainerSettings().Password != "" {
 		passwordAuthEnabled = "yes"
 	}
 
@@ -427,7 +427,7 @@ func (c *SSHContainer) discoveryContainerIP() (string, error) {
 		return "", err
 	}
 
-	getIPLoopParams := defaultRetryParams(fmt.Sprintf(" %s", c.GetContainerId()))
+	getIPLoopParams := defaultRetryParams(fmt.Sprintf("%s %s", description, c.GetContainerId()))
 	getIPCmd := []string{
 		"inspect",
 		"-f", "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
