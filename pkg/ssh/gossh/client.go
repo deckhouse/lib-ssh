@@ -48,13 +48,19 @@ func NewClient(ctx context.Context, sett settings.Settings, session *session.Ses
 }
 
 type ClientLoopsParams struct {
-	ConnectToBastion   retry.Params
-	ConnectToHost      retry.Params
-	NewSession         retry.Params
-	CheckReverseTunnel retry.Params
+	ConnectToBastion        retry.Params
+	ConnectToHostViaBastion retry.Params
+	ConnectToHostDirectly   retry.Params
+	NewSession              retry.Params
+	CheckReverseTunnel      retry.Params
 }
 
-var defaultClientLoopParamsOps = []retry.ParamsBuilderOpt{
+var defaultClientDirectlyLoopParamsOps = []retry.ParamsBuilderOpt{
+	retry.WithWait(2 * time.Second),
+	retry.WithAttempts(50),
+}
+
+var defaultClientViaBastionLoopParamsOps = []retry.ParamsBuilderOpt{
 	retry.WithWait(5 * time.Second),
 	retry.WithAttempts(30),
 }
@@ -130,10 +136,14 @@ func (s *Client) OnlyPreparePrivateKeys() error {
 }
 
 func (s *Client) Start() error {
-	if s.ctx != nil {
+	return s.startWithContext(s.ctx)
+}
+
+func (s *Client) startWithContext(ctx context.Context) error {
+	if ctx != nil {
 		select {
-		case <-s.ctx.Done():
-			return s.ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		default:
 		}
 	}
@@ -195,25 +205,24 @@ func (s *Client) Start() error {
 			Timeout:         3 * time.Second,
 		}
 		bastionAddr := fmt.Sprintf("%s:%s", s.SessionSettings.BastionHost, s.SessionSettings.BastionPort)
-		var err error
 		fullHost := fmt.Sprintf("bastion host '%s' with user '%s'", bastionAddr, s.SessionSettings.BastionUser)
 		connectToBastion := func() error {
 			logger.DebugF("Connect to %s", fullHost)
-			bastionClient, err = s.DialTimeout(s.ctx, "tcp", bastionAddr, bastionConfig)
+
+			var err error
+			bastionClient, err = s.DialTimeout(ctx, "tcp", bastionAddr, bastionConfig)
+
 			return err
 		}
-		bastionLoopParams := retry.SafeCloneOrNewParams(s.loopsParams.ConnectToBastion, defaultClientLoopParamsOps...).
+
+		bastionLoopParams := retry.SafeCloneOrNewParams(s.loopsParams.ConnectToBastion, defaultClientViaBastionLoopParamsOps...).
 			WithName("Get bastion SSH client").
 			WithLogger(logger)
-		if s.silent {
-			err = retry.NewSilentLoopWithParams(bastionLoopParams).RunContext(s.ctx, connectToBastion)
-		} else {
-			err = retry.NewSilentLoopWithParams(bastionLoopParams).RunContext(s.ctx, connectToBastion)
-		}
 
-		if err != nil {
+		if err := s.runInLoop(ctx, bastionLoopParams, connectToBastion); err != nil {
 			return fmt.Errorf("Could not connect to %s", fullHost)
 		}
+
 		logger.DebugF("Connected successfully to bastion host %s\n", bastionAddr)
 	}
 
@@ -258,7 +267,6 @@ func (s *Client) Start() error {
 	if bastionClient == nil {
 		logger.DebugLn("Try to direct connect host master host")
 
-		var err error
 		connectToHost := func() error {
 			if len(s.kubeProxies) == 0 {
 				s.SessionSettings.ChoiceNewHost()
@@ -266,19 +274,18 @@ func (s *Client) Start() error {
 
 			addr := fmt.Sprintf("%s:%s", s.SessionSettings.Host(), s.SessionSettings.Port)
 			logger.DebugF("Connect to master host '%s' with user '%s'\n", addr, s.SessionSettings.User)
-			client, err = s.DialTimeout(s.ctx, "tcp", addr, config)
+
+			var err error
+			client, err = s.DialTimeout(ctx, "tcp", addr, config)
+
 			return err
 		}
-		hostLoopParams := retry.SafeCloneOrNewParams(s.loopsParams.ConnectToHost, defaultClientLoopParamsOps...).
+
+		hostLoopParams := retry.SafeCloneOrNewParams(s.loopsParams.ConnectToHostDirectly, defaultClientDirectlyLoopParamsOps...).
 			WithName("Get SSH client").
 			WithLogger(logger)
-		if s.silent {
-			err = retry.NewSilentLoopWithParams(hostLoopParams).RunContext(s.ctx, connectToHost)
-		} else {
-			err = retry.NewLoopWithParams(hostLoopParams).RunContext(s.ctx, connectToHost)
-		}
 
-		if err != nil {
+		if err := s.runInLoop(ctx, hostLoopParams, connectToHost); err != nil {
 			lastHost := fmt.Sprintf("'%s:%s' with user '%s'", s.SessionSettings.Host(), s.SessionSettings.Port, s.SessionSettings.User)
 			return fmt.Errorf("Failed to connect to master host (last %s): %w", lastHost, err)
 		}
@@ -304,13 +311,14 @@ func (s *Client) Start() error {
 		targetNewChan    <-chan gossh.NewChannel
 		targetReqChan    <-chan *gossh.Request
 	)
+
 	connectToTarget := func() error {
 		if len(s.kubeProxies) == 0 {
 			s.SessionSettings.ChoiceNewHost()
 		}
 		addr = fmt.Sprintf("%s:%s", s.SessionSettings.Host(), s.SessionSettings.Port)
 		logger.DebugF("Connect to target host '%s' with user '%s' through bastion host\n", addr, s.SessionSettings.User)
-		targetConn, err = bastionClient.DialContext(s.ctx, "tcp", addr)
+		targetConn, err = bastionClient.DialContext(ctx, "tcp", addr)
 		if err != nil {
 			return err
 		}
@@ -322,13 +330,12 @@ func (s *Client) Start() error {
 
 		return err
 	}
-	if s.silent {
-		err = retry.NewSilentLoop("Get SSH client and connect to target host", 50, 2*time.Second).RunContext(s.ctx, connectToTarget)
-	} else {
-		err = retry.NewLoop("Get SSH client and connect to target host", 50, 2*time.Second).RunContext(s.ctx, connectToTarget)
-	}
 
-	if err != nil {
+	viaBastionLoopParams := retry.SafeCloneOrNewParams(s.loopsParams.ConnectToHostViaBastion, defaultClientViaBastionLoopParamsOps...).
+		WithName("Get SSH client and connect to target host").
+		WithLogger(logger)
+
+	if err := s.runInLoop(ctx, viaBastionLoopParams, connectToTarget); err != nil {
 		lastHost := fmt.Sprintf("'%s:%s' with user '%s'", s.SessionSettings.Host(), s.SessionSettings.Port, s.SessionSettings.User)
 		return fmt.Errorf("Failed to connect to target host through bastion host (last %s): %w", lastHost, err)
 	}
@@ -349,6 +356,15 @@ func (s *Client) Start() error {
 	}
 
 	return nil
+}
+
+func (s *Client) runInLoop(ctx context.Context, params retry.Params, task func() error) error {
+	createLoop := retry.NewLoopWithParams
+	if s.silent {
+		createLoop = retry.NewSilentLoopWithParams
+	}
+
+	return createLoop(params).RunContext(ctx, task)
 }
 
 func (s *Client) keepAlive() {

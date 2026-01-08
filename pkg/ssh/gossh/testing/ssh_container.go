@@ -48,14 +48,15 @@ func (s ContainerSettings) LocalPortString() string {
 }
 
 type SSHContainer struct {
-	settings       ContainerSettings
-	id             string
-	ip             string
-	sshdConfigPath string
-	network        string
-	testName       string
-	testID         string
-	localTmpDir    string
+	settings        ContainerSettings
+	id              string
+	ip              string
+	sshdConfigPath  string
+	network         string
+	externalNetwork bool
+	testName        string
+	testID          string
+	localTmpDir     string
 }
 
 func NewSSHContainer(settings ContainerSettings, testName string) (*SSHContainer, error) {
@@ -223,6 +224,13 @@ func (c *SSHContainer) CreateDeckhouseDirs() error {
 	return c.ExecToContainer(description("set mode"), "chmod", "-R", "777", nodeTmpPath)
 }
 
+func (c *SSHContainer) WithExternalNetwork(network string) *SSHContainer {
+	c.network = network
+	c.externalNetwork = true
+
+	return c
+}
+
 func (c *SSHContainer) GetContainerId() string {
 	return c.id
 }
@@ -354,7 +362,7 @@ func (c *SSHContainer) stopContainer() error {
 	return c.runDocker(description("remove container"), "rm", c.GetContainerId())
 }
 
-func (c *SSHContainer) isNetworkCreated(description string) error {
+func (c *SSHContainer) hasNetwork(description string) error {
 	if c.GetNetwork() != "" {
 		return nil
 	}
@@ -362,12 +370,24 @@ func (c *SSHContainer) isNetworkCreated(description string) error {
 	return c.wrapError("%s: docker network is not created. Container seems to be not connected to named bridge", description)
 }
 
+func (c *SSHContainer) isExternalNetwork() bool {
+	return c.externalNetwork
+}
+
 func (c *SSHContainer) createNetwork() error {
 	if err := c.isContainerStarted("create network"); err == nil {
 		return c.wrapError("container %s is already running", c.GetContainerId())
 	}
 
-	if err := c.isNetworkCreated("create network"); err == nil {
+	hasNetwork := c.hasNetwork("create network") == nil
+	isExternal := c.isExternalNetwork()
+
+	if hasNetwork {
+		if isExternal {
+			// do not need to create network
+			return nil
+		}
+
 		return c.wrapError("network %s is already created", c.GetContainerId())
 	}
 
@@ -383,7 +403,10 @@ func (c *SSHContainer) createNetwork() error {
 }
 
 func (c *SSHContainer) removeNetwork() error {
-	if err := c.isNetworkCreated("remove network"); err != nil {
+	hasNetwork := c.hasNetwork("remove network") == nil
+	isExternal := c.isExternalNetwork()
+
+	if !hasNetwork || isExternal {
 		return nil
 	}
 
@@ -410,7 +433,7 @@ func (c *SSHContainer) runDockerNetworkConnect(isDisconnect bool) error {
 		return err
 	}
 
-	if err := c.isNetworkCreated(description); err != nil {
+	if err := c.hasNetwork(description); err != nil {
 		return err
 	}
 
@@ -419,7 +442,7 @@ func (c *SSHContainer) runDockerNetworkConnect(isDisconnect bool) error {
 
 func (c *SSHContainer) discoveryContainerIP() (string, error) {
 	description := "Getting IP address of container"
-	if err := c.isNetworkCreated(description); err != nil {
+	if err := c.hasNetwork(description); err != nil {
 		return "", err
 	}
 

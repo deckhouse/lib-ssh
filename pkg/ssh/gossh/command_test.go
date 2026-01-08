@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/deckhouse/lib-dhctl/pkg/log"
+	"github.com/deckhouse/lib-dhctl/pkg/retry"
 	"github.com/stretchr/testify/require"
 
 	sshtesting "github.com/deckhouse/lib-connection/pkg/ssh/gossh/testing"
@@ -160,7 +161,8 @@ func TestCommandOutput(t *testing.T) {
 					defer cancel()
 				}
 				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient := NewClient(ctx, sshSettings, settings, keys)
+				sshClient := NewClient(ctx, sshSettings, settings, keys).
+					WithLoopsParams(newSessionTestLoopParams())
 				err = sshClient.Start()
 				// expecting no error on client start
 				require.NoError(t, err)
@@ -318,7 +320,8 @@ func TestCommandCombinedOutput(t *testing.T) {
 					defer cancel()
 				}
 				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient := NewClient(ctx, sshSettings, settings, keys)
+				sshClient := NewClient(ctx, sshSettings, settings, keys).
+					WithLoopsParams(newSessionTestLoopParams())
 				err = sshClient.Start()
 				// expecting no error on client start
 				require.NoError(t, err)
@@ -463,7 +466,8 @@ func TestCommandRun(t *testing.T) {
 					defer cancel()
 				}
 				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient := NewClient(ctx, sshSettings, settings, keys)
+				sshClient := NewClient(ctx, sshSettings, settings, keys).
+					WithLoopsParams(newSessionTestLoopParams())
 				err = sshClient.Start()
 				// expecting no error on client start
 				require.NoError(t, err)
@@ -540,7 +544,8 @@ func TestCommandStart(t *testing.T) {
 	keys := []session.AgentPrivateKey{{Key: path}}
 	ctx := context.Background()
 	sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-	sshClient := NewClient(ctx, sshSettings, settings, keys)
+	sshClient := NewClient(ctx, sshSettings, settings, keys).
+		WithLoopsParams(newSessionTestLoopParams())
 	err = sshClient.Start()
 	// expecting no error on client start
 	require.NoError(t, err)
@@ -781,7 +786,7 @@ func TestCommandSudoRun(t *testing.T) {
 					defer cancel()
 				}
 				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient := NewClient(ctx, sshSettings, c.settings, c.keys)
+				sshClient := NewClient(ctx, sshSettings, c.settings, c.keys).WithLoopsParams(newSessionTestLoopParams())
 				err = sshClient.Start()
 				// expecting no error on client start
 				require.NoError(t, err)
@@ -805,4 +810,13 @@ func TestCommandSudoRun(t *testing.T) {
 			})
 		}
 	})
+}
+
+func newSessionTestLoopParams() ClientLoopsParams {
+	return ClientLoopsParams{
+		NewSession: retry.NewEmptyParams(
+			retry.WithWait(2*time.Second),
+			retry.WithAttempts(5),
+		),
+	}
 }

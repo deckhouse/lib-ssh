@@ -147,7 +147,7 @@ func (p *SSHProvider) SwitchClient(_ context.Context, sess *session.Session, pri
 		PrivateKeys: privateKeysCpy,
 	}
 
-	if !govalue.IsNil(p.switchHandler) {
+	if !govalue.Nil(p.switchHandler) {
 		p.switchHandler(s)
 	}
 
@@ -281,7 +281,7 @@ func (c *Client) Command(name string, arg ...string) connection.Command {
 
 	for _, provider := range providers {
 		cmd := provider(bastion, name, arg...)
-		if !govalue.IsNil(cmd) {
+		if !govalue.Nil(cmd) {
 			return cmd
 		}
 	}
@@ -326,7 +326,7 @@ func (c *Client) File() connection.File {
 
 	// get returns error if not found
 	file := provider[0](bastion)
-	if govalue.IsNil(file) {
+	if govalue.Nil(file) {
 		return errorFile(fmt.Sprintf("File provider returns nil File for host: %s", host))
 	}
 
@@ -373,7 +373,7 @@ func (c *Client) UploadScript(scriptPath string, args ...string) connection.Scri
 
 	for _, provider := range providers {
 		s := provider(bastion, scriptPath, args...)
-		if !govalue.IsNil(s) {
+		if !govalue.Nil(s) {
 			return s
 		}
 	}
@@ -676,7 +676,7 @@ func NewFile(upload UploadFn, download DownloadFn) *File {
 }
 
 func (f *File) Upload(ctx context.Context, srcPath, dstPath string) error {
-	if govalue.IsNil(f.uploadFn) {
+	if govalue.Nil(f.uploadFn) {
 		return fmt.Errorf("uploadFn is nil for path '%s'", dstPath)
 	}
 
@@ -697,14 +697,14 @@ func (f *File) Download(ctx context.Context, srcPath, dstPath string) error {
 }
 
 func (f *File) UploadBytes(ctx context.Context, data []byte, remotePath string) error {
-	if govalue.IsNil(f.uploadFn) {
+	if govalue.Nil(f.uploadFn) {
 		return fmt.Errorf("uploadFn is nil for path '%s'", remotePath)
 	}
 	return f.uploadFn(data, remotePath)
 }
 
 func (f *File) DownloadBytes(ctx context.Context, remotePath string) ([]byte, error) {
-	if govalue.IsNil(f.downloadFn) {
+	if govalue.Nil(f.downloadFn) {
 		return nil, fmt.Errorf("downloadFn is nil for path '%s'", remotePath)
 	}
 	return f.downloadFn(remotePath)

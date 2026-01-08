@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/deckhouse/lib-dhctl/pkg/log"
+	"github.com/deckhouse/lib-dhctl/pkg/retry"
 	gossh "github.com/deckhouse/lib-gossh"
 	"github.com/name212/govalue"
 	"github.com/stretchr/testify/require"
@@ -248,7 +249,7 @@ func LogErrorOrAssert(t *testing.T, description string, err error, logger log.Lo
 		return
 	}
 
-	if govalue.IsNil(logger) {
+	if govalue.Nil(logger) {
 		require.NoError(t, err, description)
 		return
 	}
@@ -292,6 +293,13 @@ func CheckSkipSSHTest(t *testing.T, testName string) {
 	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
 		t.Skipf("Skipping %s test", testName)
 	}
+}
+
+func GetTestLoopParamsForFailed() retry.Params {
+	return retry.NewEmptyParams(
+		retry.WithWait(2*time.Second),
+		retry.WithAttempts(4),
+	)
 }
 
 func removeFiles(paths ...string) []error {

@@ -28,7 +28,7 @@ type NodeInterfaceWrapper struct {
 }
 
 func NewNodeInterfaceWrapper(sshClient connection.SSHClient, sett settings.Settings) *NodeInterfaceWrapper {
-	if govalue.IsNil(sshClient) {
+	if govalue.Nil(sshClient) {
 		return nil
 	}
 

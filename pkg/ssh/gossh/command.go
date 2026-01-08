@@ -99,11 +99,12 @@ func NewSSHCommand(client *Client, name string, arg ...string) *SSHCommand {
 	var session *gossh.Session
 	var err error
 
-	newSessionLoppParams := retry.SafeCloneOrNewParams(client.loopsParams.NewSession, defaultSessionLoopParamsOps...).
+	// todo move to context run
+	newSessionLoopParams := retry.SafeCloneOrNewParams(client.loopsParams.NewSession, defaultSessionLoopParamsOps...).
 		WithName("Establish new session").
 		WithLogger(client.settings.Logger())
 
-	err = retry.NewSilentLoopWithParams(newSessionLoppParams).Run(func() error {
+	err = retry.NewSilentLoopWithParams(newSessionLoopParams).Run(func() error {
 		session, err = client.sshClient.NewSession()
 		return err
 	})
@@ -705,7 +706,7 @@ func (c *SSHCommand) readFromStreams(stdoutReadPipe io.Reader, stdoutHandlerWrit
 	defer c.logDebugF("readFromStreams stopped")
 	defer c.wg.Done()
 
-	if govalue.IsNil(stdoutReadPipe) {
+	if govalue.Nil(stdoutReadPipe) {
 		c.logDebugF("stdout pipe is nil")
 		return
 	}

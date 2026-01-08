@@ -56,14 +56,14 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 	t.Run("OnlyPrepareKeys cases", func(t *testing.T) {
 		cases := []struct {
 			title    string
-			settings session.Session
+			settings *session.Session
 			keys     []session.AgentPrivateKey
 			wantErr  bool
 			err      string
 		}{
 			{
 				title: "No keys",
-				settings: *session.NewSession(session.Input{
+				settings: session.NewSession(session.Input{
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022",
@@ -73,7 +73,7 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 			},
 			{
 				title: "Key auth, no password",
-				settings: *session.NewSession(session.Input{
+				settings: session.NewSession(session.Input{
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022"}),
@@ -82,7 +82,7 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 			},
 			{
 				title: "Key auth, no password, noexistent key",
-				settings: *session.NewSession(session.Input{
+				settings: session.NewSession(session.Input{
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022"}),
@@ -92,7 +92,7 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 			},
 			{
 				title: "Key auth, no password, wrong key",
-				settings: *session.NewSession(session.Input{
+				settings: session.NewSession(session.Input{
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022"}),
@@ -102,7 +102,7 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 			},
 			{
 				title: "Key auth, with passphrase",
-				settings: *session.NewSession(session.Input{
+				settings: session.NewSession(session.Input{
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022"}),
@@ -111,7 +111,7 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 			},
 			{
 				title: "Key auth, with wrong passphrase",
-				settings: *session.NewSession(session.Input{
+				settings: session.NewSession(session.Input{
 					AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
 					User:           "user",
 					Port:           "20022"}),
@@ -125,7 +125,7 @@ func TestOnlyPreparePrivateKeys(t *testing.T) {
 			t.Run(c.title, func(t *testing.T) {
 				var sshClient *Client
 				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient = NewClient(context.Background(), sshSettings, &c.settings, c.keys)
+				sshClient = NewClient(context.Background(), sshSettings, c.settings, c.keys)
 				err := sshClient.OnlyPreparePrivateKeys()
 				if !c.wantErr {
 					require.NoError(t, err)
@@ -186,10 +186,10 @@ func TestClientStart(t *testing.T) {
 		Username:   "bastionuser",
 		LocalPort:  20023,
 		SudoAccess: true,
-		// cannot start test w/o config file
-		// cannot start test w/o container
 	}, "client start bastion")
 	require.NoError(t, err)
+
+	bastion.WithExternalNetwork(container.GetNetwork())
 
 	err = bastion.WriteConfig()
 	if err != nil {
@@ -209,12 +209,13 @@ func TestClientStart(t *testing.T) {
 
 	t.Run("Start ssh client", func(t *testing.T) {
 		cases := []struct {
-			title    string
-			settings *session.Session
-			keys     []session.AgentPrivateKey
-			wantErr  bool
-			err      string
-			authSock string
+			title      string
+			settings   *session.Session
+			keys       []session.AgentPrivateKey
+			wantErr    bool
+			err        string
+			authSock   string
+			loopParams ClientLoopsParams
 		}{
 			{
 				title: "Password auth, no keys",
@@ -293,6 +294,9 @@ func TestClientStart(t *testing.T) {
 				wantErr:  true,
 				err:      "Failed to connect to master host",
 				authSock: "",
+				loopParams: ClientLoopsParams{
+					ConnectToHostDirectly: sshtesting.GetTestLoopParamsForFailed(),
+				},
 			},
 			{
 				title: "With bastion, key auth",
@@ -368,6 +372,9 @@ func TestClientStart(t *testing.T) {
 				wantErr:  true,
 				err:      "Failed to connect to target host through bastion host",
 				authSock: "",
+				loopParams: ClientLoopsParams{
+					ConnectToHostViaBastion: sshtesting.GetTestLoopParamsForFailed(),
+				},
 			},
 			{
 				title: "With bastion, key auth, wrong bastion port",
@@ -383,6 +390,9 @@ func TestClientStart(t *testing.T) {
 				wantErr:  true,
 				err:      "Could not connect to bastion host",
 				authSock: "",
+				loopParams: ClientLoopsParams{
+					ConnectToBastion: sshtesting.GetTestLoopParamsForFailed(),
+				},
 			},
 		}
 
@@ -393,11 +403,13 @@ func TestClientStart(t *testing.T) {
 
 				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
 
-				sshClient = NewClient(context.Background(), sshSettings, c.settings, c.keys)
+				sshClient = NewClient(context.Background(), sshSettings, c.settings, c.keys).
+					WithLoopsParams(c.loopParams)
+
 				err = sshClient.Start()
 				if !c.wantErr {
 					require.NoError(t, err)
-					fmt.Println("client started successfully")
+					logger.InfoLn("client started successfully")
 				} else {
 					require.Error(t, err)
 					require.Contains(t, err.Error(), c.err)
