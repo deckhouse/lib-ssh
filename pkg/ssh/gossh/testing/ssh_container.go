@@ -17,15 +17,16 @@ package ssh_testing
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/deckhouse/lib-dhctl/pkg/log"
 	"github.com/deckhouse/lib-dhctl/pkg/retry"
+	"github.com/name212/govalue"
 )
 
 const (
@@ -33,66 +34,83 @@ const (
 	dockerNamePrefix = "test_lib_connection"
 )
 
-type ContainerSettings struct {
-	PublicKey     string
-	PublicKeyPath string
-	Password      string
-	Username      string
-	NodeTmpPath   string
-	LocalPort     int
-	SudoAccess    bool
+type PublicKey struct {
+	Key  string
+	Path string
 }
 
-func (s ContainerSettings) LocalPortString() string {
+type ContainerSettings struct {
+	*Test
+
+	PublicKey   *PublicKey
+	Password    string
+	Username    string
+	NodeTmpPath string
+	LocalPort   int
+	SudoAccess  bool
+}
+
+func (s *ContainerSettings) LocalPortString() string {
 	return strconv.Itoa(s.LocalPort)
 }
 
+func (s *ContainerSettings) HasPublicKey() bool {
+	return !govalue.Nil(s.PublicKey)
+}
+
+func (s *ContainerSettings) HasPublicKeyContent() bool {
+	return s.HasPublicKey() && s.PublicKey.Key != ""
+}
+
+func (s *ContainerSettings) HasPublicKeyPath() bool {
+	return s.HasPublicKey() && s.PublicKey.Path != ""
+}
+
+func (s *ContainerSettings) HasPassword() bool {
+	return s.Password != ""
+}
+
 type SSHContainer struct {
-	settings        ContainerSettings
+	settings        *ContainerSettings
 	id              string
 	ip              string
 	sshdConfigPath  string
 	network         string
 	externalNetwork bool
-	testName        string
-	testID          string
-	localTmpDir     string
 }
 
-func NewSSHContainer(settings ContainerSettings, testName string) (*SSHContainer, error) {
-	if settings.NodeTmpPath == "" {
-		settings.NodeTmpPath = "/opt/deckhouse/tmp"
+func NewSSHContainer(settings *ContainerSettings) (*SSHContainer, error) {
+	if govalue.Nil(settings) {
+		return nil, errors.New("settings must be provided")
 	}
 
-	if settings.LocalPort <= 0 {
-		settings.LocalPort = randRange(22000, 29999)
+	if govalue.Nil(settings.Test) {
+		return nil, errors.New("Test must not be nil in settings")
 	}
 
-	id := testID(testName)
+	if settings.Test.TestName == "" {
+		return nil, errors.New("testName is empty")
+	}
+
+	if settings.Test.IsZero() {
+		return nil, errors.New("Test is empty")
+	}
+
+	// <= 1024 port require root privilege
+	if settings.LocalPort <= 1024 {
+		settings.LocalPort = RandPort()
+	}
 
 	c := &SSHContainer{
 		settings: settings,
-		testName: testName,
-		testID:   id,
 	}
-
-	localTmpDirStr := filepath.Join(os.TempDir(), tmpGlobalDirName, id)
-	err := os.MkdirAll(localTmpDirStr, 0777)
-	if err != nil {
-		return nil, c.wrapError("failed to create local tmp dir %s: %v", localTmpDirStr, err)
-	}
-	localTmpDir, err := os.MkdirTemp(localTmpDirStr, "ssh")
-	if err != nil {
-		return nil, c.wrapError("failed to create temporary local tmp dir %s: %v", localTmpDirStr, err)
-	}
-	c.localTmpDir = localTmpDir
 
 	return c, nil
 }
 
 // force AllowTcpForwarding yes to allow connection throufh bastion
 func (c *SSHContainer) WriteConfig() error {
-	conf, err := os.CreateTemp(c.localTmpDir, "sshd_config")
+	conf, err := os.CreateTemp(c.settings.Test.LocalTmpDir, "sshd_config")
 	if err != nil {
 		return err
 	}
@@ -132,15 +150,13 @@ func (c *SSHContainer) RemoveSSHDConfig() error {
 	return nil
 }
 
-func (c *SSHContainer) Start() error {
+func (c *SSHContainer) Start(waitSSHDStarted bool) error {
 	err := c.createNetwork()
 	if err != nil {
 		return err
 	}
 
-	cmd := append([]string{"run"}, c.runContainerArgs()...)
-
-	id, err := c.runDockerWithOut("start container", cmd...)
+	err = c.startContainer(waitSSHDStarted)
 	if err != nil {
 		loopParams := defaultRetryParams(fmt.Sprintf("Remove network %s after fail run container", c.GetNetwork()))
 		removeNetworkErr := retry.NewLoopWithParams(loopParams).Run(func() error {
@@ -153,17 +169,15 @@ func (c *SSHContainer) Start() error {
 		return err
 	}
 
-	c.id = strings.TrimSpace(id)
+	return nil
+}
 
-	c.ip, err = c.discoveryContainerIP()
-	if err != nil {
-		if stopErr := c.Stop(); stopErr != nil {
-			err = c.wrapError("%v and cannot cleanup: %v", err, stopErr)
-		}
+func (c *SSHContainer) Restart(waitSSHDStarted bool) error {
+	if err := c.stopContainer(); err != nil {
 		return err
 	}
 
-	return nil
+	return c.startContainer(waitSSHDStarted)
 }
 
 func (c *SSHContainer) Stop() error {
@@ -177,7 +191,7 @@ func (c *SSHContainer) Stop() error {
 	}
 
 	if resError != "" {
-		return errors.New(resError)
+		return c.wrapError("cannot fully stop container: %v", errors.New(resError))
 	}
 
 	return nil
@@ -247,7 +261,7 @@ func (c *SSHContainer) GetSSHDConfigPath() string {
 	return c.sshdConfigPath
 }
 
-func (c *SSHContainer) ContainerSettings() ContainerSettings {
+func (c *SSHContainer) ContainerSettings() *ContainerSettings {
 	return c.settings
 }
 
@@ -255,8 +269,12 @@ func (c *SSHContainer) RemotePortString() string {
 	return "2222"
 }
 
+func (c *SSHContainer) LocalPortString() string {
+	return c.settings.LocalPortString()
+}
+
 func (c *SSHContainer) dockerName() string {
-	return fmt.Sprintf("%s_%s", dockerNamePrefix, c.testID)
+	return fmt.Sprintf("%s_%s", dockerNamePrefix, c.settings.Test.ID)
 }
 
 func (c *SSHContainer) runDockerWithOut(description string, command ...string) (string, error) {
@@ -279,8 +297,7 @@ func (c *SSHContainer) runDocker(description string, command ...string) error {
 }
 
 func (c *SSHContainer) wrapError(format string, args ...any) error {
-	f := c.testName + ": " + format
-	return fmt.Errorf(f, args...)
+	return c.settings.Test.WrapError(format, args...)
 }
 
 func (c *SSHContainer) isContainerStarted(description string) error {
@@ -304,22 +321,22 @@ func (c *SSHContainer) runContainerArgs() []string {
 		"--network", c.GetNetwork(),
 	}
 
-	if len(settings.PublicKey) > 0 {
+	if settings.HasPublicKeyContent() {
 		args = append(args, "-e")
-		args = append(args, "PUBLIC_KEY="+settings.PublicKey)
+		args = append(args, "PUBLIC_KEY="+settings.PublicKey.Key)
 	}
-	if len(settings.PublicKeyPath) > 0 {
+	if settings.HasPublicKeyPath() {
 		args = append(args, "-e")
-		args = append(args, "PUBLIC_KEY_FILE="+settings.PublicKeyPath)
+		args = append(args, "PUBLIC_KEY_FILE="+settings.PublicKey.Path)
 	}
 	// set default password if no auth methods present
-	if len(settings.PublicKey) == 0 && len(settings.PublicKeyPath) == 0 && len(settings.Password) == 0 {
+	if !settings.HasPublicKeyContent() && !settings.HasPublicKeyPath() && !settings.HasPassword() {
 		c.settings.Password = "password"
 	}
 
 	settings = c.ContainerSettings()
 
-	if len(settings.Password) > 0 {
+	if settings.HasPassword() {
 		args = append(args, "-e")
 		args = append(args, "PASSWORD_ACCESS=true")
 		args = append(args, "-e")
@@ -344,6 +361,50 @@ func (c *SSHContainer) runContainerArgs() []string {
 	args = append(args, image)
 
 	return args
+}
+
+func (c *SSHContainer) startContainer(waitSSHDStarted bool) error {
+	cmd := append([]string{"run"}, c.runContainerArgs()...)
+
+	id, err := c.runDockerWithOut("start container", cmd...)
+
+	c.id = strings.TrimSpace(id)
+
+	c.ip, err = c.discoveryContainerIP()
+	if err != nil {
+		if stopErr := c.stopContainer(); stopErr != nil {
+			err = c.wrapError("%v and cannot stop container: %v", err, stopErr)
+		}
+		return err
+	}
+
+	if !waitSSHDStarted {
+		return nil
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%s", c.LocalPortString())
+
+	loopParams := defaultRetryParams("Wait SSHD started after restart container")
+	err = retry.NewLoopWithParams(loopParams).Run(func() error {
+		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err != nil {
+			return err
+		}
+		if err := conn.Close(); err != nil {
+			c.ContainerSettings().Logger.InfoF("Failed to close SSHD connection after restart container: %v", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		if stopErr := c.stopContainer(); stopErr != nil {
+			err = c.wrapError("%v and cannot stop container: %v", err, stopErr)
+		}
+		return err
+	}
+
+	return nil
 }
 
 func (c *SSHContainer) stopContainer() error {

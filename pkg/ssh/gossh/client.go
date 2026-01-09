@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"slices"
 	"sync"
 	"time"
@@ -161,7 +160,7 @@ func (s *Client) startWithContext(ctx context.Context) error {
 	}
 
 	var agentClient agent.ExtendedAgent
-	socket := os.Getenv("SSH_AUTH_SOCK")
+	socket := s.settings.AuthSock()
 	if socket != "" {
 		logger.DebugLn("Dialing SSH agent unix socket...")
 		socketConn, err := net.Dial("unix", socket)
@@ -603,6 +602,27 @@ func (s *Client) Loop(fn connection.SSHLoopHandler) error {
 	}
 
 	return nil
+}
+
+func (s *Client) NewSession() (*gossh.Session, error) {
+	var sess *gossh.Session
+
+	newSessionLoopParams := retry.SafeCloneOrNewParams(s.loopsParams.NewSession, defaultSessionLoopParamsOps...).
+		WithName("Establish new session").
+		WithLogger(s.settings.Logger())
+
+	err := retry.NewSilentLoopWithParams(newSessionLoopParams).RunContext(s.ctx, func() error {
+		var err error
+		sess, err = s.sshClient.NewSession()
+		return err
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	s.RegisterSession(sess)
+	return sess, nil
 }
 
 func (s *Client) GetClient() *gossh.Client {

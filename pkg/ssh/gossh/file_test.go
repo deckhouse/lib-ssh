@@ -30,79 +30,46 @@ import (
 )
 
 func TestSSHFileUpload(t *testing.T) {
-	testName := "TestSSHFileUpload"
+	test := sshtesting.ShouldNewTest(t, "TestCommandOutput")
 
-	sshtesting.CheckSkipSSHTest(t, testName)
-
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
-
-	// genetaring ssh keys
-	path, publicKey, err := sshtesting.GenerateKeys("")
-	if err != nil {
-		return
-	}
-
-	// starting openssh container with password auth
-	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
-		PublicKey:  publicKey,
-		Username:   testName,
-		LocalPort:  20020,
-		SudoAccess: true,
-	}, testName)
-	require.NoError(t, err)
-
-	err = container.Start()
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
-	})
+	container := sshtesting.NewTestContainerWrapper(t, test)
+	sess := sshtesting.Session(container)
+	keys := container.AgentPrivateKeys()
 
 	// creating direactory to upload
-	testDir := filepath.Join(os.TempDir(), "dhctltests", "upload")
-	err = os.MkdirAll(testDir, 0755)
-	if err != nil {
-		// cannot start test w/o files to upload
-		return
-	}
+	testDir := filepath.Join(test.LocalTmpDir, "upload_dir")
+
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
 
 	testFile, err := os.CreateTemp(testDir, "upload")
-	if err != nil {
-		// cannot start test w/o files to upload
-		return
-	}
-	testFile.WriteString("Hello world")
+	require.NoError(t, err)
+
+	_, err = testFile.WriteString("Hello world")
+	require.NoError(t, err)
+
 	// create some files for recursive upload
-	os.CreateTemp(testDir, "second")
-	os.CreateTemp(testDir, "third")
+	_, err = os.CreateTemp(testDir, "second")
+	require.NoError(t, err)
+
+	_, err = os.CreateTemp(testDir, "third")
+	require.NoError(t, err)
 
 	symlink := filepath.Join(os.TempDir(), "new-test-file")
 	err = os.Symlink(testFile.Name(), symlink)
-	if err != nil {
-		// cannot start test w/o symlink
-		os.Remove(symlink)
-		os.Symlink(testFile.Name(), symlink)
-		// return
-	}
+	require.NoError(t, err)
 
-	os.Setenv("SSH_AUTH_SOCK", "")
+	sshSettings := sshtesting.CreateDefaultTestSettings(test)
+	sshClient := NewClient(context.Background(), sshSettings, sess, keys).WithLoopsParams(ClientLoopsParams{
+		NewSession: sshtesting.GetTestLoopParamsForFailed(),
+	})
 
-	settings := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20020"})
-	keys := []session.AgentPrivateKey{{Key: path}}
-	sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-	sshClient := NewClient(context.Background(), sshSettings, settings, keys)
 	err = sshClient.Start()
 	// expecting no error on client start
 	require.NoError(t, err)
 
-	t.Cleanup(func() {
-		sshClient.Stop()
-		os.RemoveAll(testDir)
-		os.Remove(symlink)
-	})
+	registerStopClient(t, sshClient)
+
 	t.Run("Upload files and directories to container via existing ssh client", func(t *testing.T) {
 		cases := []struct {
 			title   string
@@ -204,9 +171,9 @@ func TestSSHFileUpload(t *testing.T) {
 		// testFile contains "Hello world" string
 		require.NoError(t, err)
 
-		sess, err := sshClient.GetClient().NewSession()
+		s, err := sshClient.NewSession()
 		require.NoError(t, err)
-		defer sess.Close()
+		defer sshClient.UnregisterSession()
 		out, err := sess.Output("cat /tmp/testfile.txt")
 		require.NoError(t, err)
 		// out contains a contant of uploaded file, should be equal to testFile contant
@@ -234,50 +201,19 @@ func TestSSHFileUpload(t *testing.T) {
 }
 
 func TestSSHFileUploadBytes(t *testing.T) {
-	testName := "TestSSHFileUploadBytes"
+	test := sshtesting.ShouldNewTest(t, "TestSSHFileUploadBytes")
 
-	sshtesting.CheckSkipSSHTest(t, testName)
+	container := sshtesting.NewTestContainerWrapper(t, test)
+	sess := sshtesting.Session(container)
+	keys := container.AgentPrivateKeys()
 
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
-
-	// genetaring ssh keys
-	path, publicKey, err := sshtesting.GenerateKeys("")
-	if err != nil {
-		return
-	}
-
-	// starting openssh container with password auth
-	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
-		PublicKey:  publicKey,
-		Username:   "user",
-		LocalPort:  20020,
-		SudoAccess: true,
-	}, testName)
-	require.NoError(t, err)
-
-	err = container.Start()
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
-	})
-
-	os.Setenv("SSH_AUTH_SOCK", "")
-
-	settings := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20020"})
-	keys := []session.AgentPrivateKey{{Key: path}}
-	sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-	sshClient := NewClient(context.Background(), sshSettings, settings, keys)
-	err = sshClient.Start()
+	sshSettings := sshtesting.CreateDefaultTestSettings(test)
+	sshClient := NewClient(context.Background(), sshSettings, sess, keys)
+	err := sshClient.Start()
 	// expecting no error on client start
 	require.NoError(t, err)
 
-	t.Cleanup(func() {
-		sshClient.Stop()
-	})
+	registerStopClient(t, sshClient)
 
 	t.Run("Upload bytes", func(t *testing.T) {
 		f := sshClient.File()

@@ -15,14 +15,104 @@
 package ssh_testing
 
 import (
+	"fmt"
+	"strconv"
+
 	"github.com/deckhouse/lib-connection/pkg/settings"
+	"github.com/deckhouse/lib-connection/pkg/ssh/session"
 	"github.com/deckhouse/lib-dhctl/pkg/log"
 )
 
-func CreateDefaultTestSettings() (settings.Settings, *log.InMemoryLogger) {
-	logger := log.NewInMemoryLoggerWithParent(log.NewSimpleLogger(log.LoggerOptions{IsDebug: true}))
-	return settings.NewBaseProviders(settings.ProviderParams{
-		LoggerProvider: log.SimpleLoggerProvider(logger),
+func TestLogger() *log.InMemoryLogger {
+	return log.NewInMemoryLoggerWithParent(log.NewPrettyLogger(log.LoggerOptions{IsDebug: false}))
+}
+
+func getDefaultParams(test *Test) settings.ProviderParams {
+	return settings.ProviderParams{
+		LoggerProvider: log.SimpleLoggerProvider(test.Logger),
 		IsDebug:        true,
-	}), logger
+	}
+}
+
+func CreateDefaultTestSettings(test *Test) settings.Settings {
+	return settings.NewBaseProviders(getDefaultParams(test))
+}
+
+func CreateDefaultTestSettingsWithAgent(test *Test, agentSockPath string) settings.Settings {
+	params := getDefaultParams(test)
+	params.AuthSock = agentSockPath
+	return settings.NewBaseProviders(params)
+}
+
+type SessionOverride func(input *session.Input)
+
+func OverrideSessionWithIncorrectPort(wrappers ...*TestContainerWrapper) SessionOverride {
+	return func(input *session.Input) {
+		exclude := make([]int, 0, len(wrappers))
+		for _, wrapper := range wrappers {
+			exclude = append(exclude, wrapper.LocalPort())
+		}
+
+		input.Port = strconv.Itoa(RandPortExclude(exclude))
+	}
+}
+
+func Session(wrapper *TestContainerWrapper, overrides ...SessionOverride) *session.Session {
+	container := wrapper.Container
+	sett := container.ContainerSettings()
+
+	input := session.Input{
+		AvailableHosts: []session.Host{
+			{Host: "127.0.0.1", Name: "localhost"},
+		},
+		User:       sett.Username,
+		Port:       container.LocalPortString(),
+		BecomePass: sett.Password,
+	}
+
+	for _, override := range overrides {
+		override(&input)
+	}
+
+	return session.NewSession(input)
+}
+
+func SessionWithBastion(wrapper *TestContainerWrapper, bastionWrapper *TestContainerWrapper, overrides ...SessionOverride) *session.Session {
+	container := wrapper.Container
+	sett := container.ContainerSettings()
+
+	bastionContainer := bastionWrapper.Container
+	bastionSetting := bastionContainer.ContainerSettings()
+
+	input := session.Input{
+		AvailableHosts: []session.Host{
+			{Host: "127.0.0.1", Name: "localhost"},
+		},
+		User:            sett.Username,
+		Port:            container.RemotePortString(),
+		BecomePass:      sett.Password,
+		BastionHost:     "127.0.0.1",
+		BastionPort:     bastionContainer.LocalPortString(),
+		BastionUser:     bastionSetting.Username,
+		BastionPassword: bastionSetting.Password,
+	}
+
+	for _, override := range overrides {
+		override(&input)
+	}
+
+	return session.NewSession(input)
+}
+
+func FakeSession() *session.Session {
+	third := RandRange(1, 254)
+	four := RandRange(1, 254)
+	host := fmt.Sprintf("192.168.%d.%d", third, four)
+
+	return session.NewSession(session.Input{
+		AvailableHosts: []session.Host{{Host: host, Name: host}},
+		User:           "user",
+		Port:           strconv.Itoa(RandPort()),
+		BecomePass:     RandPassword(6),
+	})
 }

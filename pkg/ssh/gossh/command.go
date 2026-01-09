@@ -27,7 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/deckhouse/lib-dhctl/pkg/retry"
 	gossh "github.com/deckhouse/lib-gossh"
 	"github.com/name212/govalue"
 
@@ -96,19 +95,8 @@ func NewSSHCommand(client *Client, name string, arg ...string) *SSHCommand {
 		}
 	}
 
-	var session *gossh.Session
-	var err error
-
-	// todo move to context run
-	newSessionLoopParams := retry.SafeCloneOrNewParams(client.loopsParams.NewSession, defaultSessionLoopParamsOps...).
-		WithName("Establish new session").
-		WithLogger(client.settings.Logger())
-
-	err = retry.NewSilentLoopWithParams(newSessionLoopParams).Run(func() error {
-		session, err = client.sshClient.NewSession()
-		return err
-	})
-	client.RegisterSession(session)
+	// todo move new session to Start()
+	session, _ := client.NewSession()
 
 	return &SSHCommand{
 		// Executor: process.NewDefaultExecutor(sess.Run(cmd)),

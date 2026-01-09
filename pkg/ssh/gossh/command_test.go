@@ -17,11 +17,9 @@ package gossh
 import (
 	"bytes"
 	"context"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/deckhouse/lib-dhctl/pkg/log"
 	"github.com/deckhouse/lib-dhctl/pkg/retry"
 	"github.com/stretchr/testify/require"
 
@@ -30,41 +28,11 @@ import (
 )
 
 func TestCommandOutput(t *testing.T) {
-	testName := "TestCommandOutput"
+	test := sshtesting.ShouldNewTest(t, "TestCommandOutput")
 
-	sshtesting.CheckSkipSSHTest(t, testName)
-
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
-
-	// genetaring ssh keys
-	path, publicKey, err := sshtesting.GenerateKeys("")
-	if err != nil {
-		return
-	}
-
-	// starting openssh container without password auth
-	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
-		PublicKey:  publicKey,
-		Username:   "user",
-		LocalPort:  20027,
-		SudoAccess: true,
-	}, testName)
-	require.NoError(t, err)
-
-	err = container.Start()
-	require.NoError(t, err)
-
-	os.Setenv("SSH_AUTH_SOCK", "")
-
-	settings := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20027"})
-	keys := []session.AgentPrivateKey{{Key: path}}
-
-	t.Cleanup(func() {
-		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
-	})
+	container := sshtesting.NewTestContainerWrapper(t, test)
+	sess := sshtesting.Session(container)
+	keys := container.AgentPrivateKeys()
 
 	t.Run("Get command Output", func(t *testing.T) {
 		cases := []struct {
@@ -81,13 +49,13 @@ func TestCommandOutput(t *testing.T) {
 			{
 				title:          "Just echo, success",
 				command:        "echo",
-				args:           []string{"\"test output\""},
+				args:           []string{`"test output"`},
 				expectedOutput: "test output\n",
 				wantErr:        false,
 			},
 			{
 				title:          "With context",
-				command:        "while true; do echo \"test\"; sleep 5; done",
+				command:        `while true; do echo "test"; sleep 5; done`,
 				args:           []string{},
 				expectedOutput: "test\ntest\n",
 				timeout:        7 * time.Second,
@@ -96,7 +64,7 @@ func TestCommandOutput(t *testing.T) {
 			{
 				title:             "Command return error",
 				command:           "cat",
-				args:              []string{"\"/etc/sudoers\""},
+				args:              []string{`"/etc/sudoers"`},
 				wantErr:           true,
 				err:               "Process exited with status 1",
 				expectedErrOutput: "cat: /etc/sudoers: Permission denied\n",
@@ -104,7 +72,7 @@ func TestCommandOutput(t *testing.T) {
 			{
 				title:   "With opened stdout pipe",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output"`},
 				prepareFunc: func(c *SSHCommand) error {
 					return c.Run(context.Background())
 				},
@@ -114,7 +82,7 @@ func TestCommandOutput(t *testing.T) {
 			{
 				title:   "With opened stderr pipe",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output"`},
 				prepareFunc: func(c *SSHCommand) error {
 					buf := new(bytes.Buffer)
 					c.session.Stderr = buf
@@ -126,7 +94,7 @@ func TestCommandOutput(t *testing.T) {
 			{
 				title:   "With nil session",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output"`},
 				prepareFunc: func(c *SSHCommand) error {
 					err := c.session.Close()
 					c.session = nil
@@ -138,7 +106,7 @@ func TestCommandOutput(t *testing.T) {
 			{
 				title:   "With defined buffers",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output"`},
 				prepareFunc: func(c *SSHCommand) error {
 					c.out = new(bytes.Buffer)
 					c.err = new(bytes.Buffer)
@@ -160,12 +128,15 @@ func TestCommandOutput(t *testing.T) {
 				if cancel != nil {
 					defer cancel()
 				}
-				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient := NewClient(ctx, sshSettings, settings, keys).
+				sshSettings := sshtesting.CreateDefaultTestSettings(test)
+				sshClient := NewClient(ctx, sshSettings, sess, keys).
 					WithLoopsParams(newSessionTestLoopParams())
-				err = sshClient.Start()
+				err := sshClient.Start()
 				// expecting no error on client start
 				require.NoError(t, err)
+
+				registerStopClient(t, sshClient)
+
 				cmd := NewSSHCommand(sshClient, c.command, c.args...)
 
 				if c.prepareFunc != nil {
@@ -181,49 +152,17 @@ func TestCommandOutput(t *testing.T) {
 					require.Equal(t, c.expectedErrOutput, string(errBytes))
 					require.Contains(t, err.Error(), c.err)
 				}
-				sshClient.Stop()
 			})
 		}
 	})
 }
 
 func TestCommandCombinedOutput(t *testing.T) {
-	testName := "TestCommandCombinedOutput"
+	test := sshtesting.ShouldNewTest(t, "TestCommandCombinedOutput")
 
-	sshtesting.CheckSkipSSHTest(t, testName)
-
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
-
-	os.Setenv("DHCTL_DEBUG", "yes")
-	// genetaring ssh keys
-	path, publicKey, err := sshtesting.GenerateKeys("")
-	if err != nil {
-		return
-	}
-
-	// starting openssh container without password auth
-	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
-		PublicKey:  publicKey,
-		Username:   "user",
-		LocalPort:  20028,
-		SudoAccess: true,
-	}, testName)
-	require.NoError(t, err)
-
-	err = container.Start()
-	require.NoError(t, err)
-
-	os.Setenv("SSH_AUTH_SOCK", "")
-
-	settings := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20028"})
-	keys := []session.AgentPrivateKey{{Key: path}}
-
-	t.Cleanup(func() {
-		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
-	})
+	container := sshtesting.NewTestContainerWrapper(t, test)
+	sess := sshtesting.Session(container)
+	keys := container.AgentPrivateKeys()
 
 	t.Run("Get command CombinedOutput", func(t *testing.T) {
 		cases := []struct {
@@ -319,12 +258,15 @@ func TestCommandCombinedOutput(t *testing.T) {
 				if cancel != nil {
 					defer cancel()
 				}
-				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient := NewClient(ctx, sshSettings, settings, keys).
+				sshSettings := sshtesting.CreateDefaultTestSettings(test)
+				sshClient := NewClient(ctx, sshSettings, sess, keys).
 					WithLoopsParams(newSessionTestLoopParams())
-				err = sshClient.Start()
+				err := sshClient.Start()
 				// expecting no error on client start
 				require.NoError(t, err)
+
+				registerStopClient(t, sshClient)
+
 				cmd := NewSSHCommand(sshClient, c.command, c.args...)
 				if c.prepareFunc != nil {
 					err = c.prepareFunc(cmd)
@@ -339,48 +281,17 @@ func TestCommandCombinedOutput(t *testing.T) {
 					require.Equal(t, c.expectedErrOutput, string(combined))
 					require.Contains(t, err.Error(), c.err)
 				}
-				sshClient.Stop()
 			})
 		}
 	})
 }
 
 func TestCommandRun(t *testing.T) {
-	testName := "TestCommandRun"
+	test := sshtesting.ShouldNewTest(t, "TestCommandRun")
 
-	sshtesting.CheckSkipSSHTest(t, testName)
-
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
-
-	// genetaring ssh keys
-	path, publicKey, err := sshtesting.GenerateKeys("")
-	if err != nil {
-		return
-	}
-
-	// starting openssh container without password auth
-	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
-		PublicKey:  publicKey,
-		Username:   "user",
-		LocalPort:  20028,
-		SudoAccess: true,
-	}, testName)
-	require.NoError(t, err)
-
-	err = container.Start()
-	require.NoError(t, err)
-
-	os.Setenv("SSH_AUTH_SOCK", "")
-
-	settings := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20028"})
-	keys := []session.AgentPrivateKey{{Key: path}}
-
-	t.Cleanup(func() {
-		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
-	})
+	container := sshtesting.NewTestContainerWrapper(t, test)
+	sess := sshtesting.Session(container)
+	keys := container.AgentPrivateKeys()
 
 	// evns test
 	envs := make(map[string]string)
@@ -402,21 +313,21 @@ func TestCommandRun(t *testing.T) {
 			{
 				title:          "Just echo, success",
 				command:        "echo",
-				args:           []string{"\"test output\""},
+				args:           []string{`"est output"`},
 				expectedOutput: "test output\n",
 				wantErr:        false,
 			},
 			{
 				title:          "Just echo, with envs, success",
 				command:        "echo",
-				args:           []string{"\"test output\""},
+				args:           []string{`test output"`},
 				expectedOutput: "test output\n",
 				envs:           envs,
 				wantErr:        false,
 			},
 			{
 				title:          "With context",
-				command:        "while true; do echo \"test\"; sleep 5; done",
+				command:        `while true; do echo "test"; sleep 5; done`,
 				args:           []string{},
 				expectedOutput: "test\ntest\n",
 				timeout:        7 * time.Second,
@@ -425,7 +336,7 @@ func TestCommandRun(t *testing.T) {
 			{
 				title:             "Command return error",
 				command:           "cat",
-				args:              []string{"\"/etc/sudoers\""},
+				args:              []string{`"/etc/sudoers"`},
 				wantErr:           true,
 				err:               "Process exited with status 1",
 				expectedErrOutput: "cat: /etc/sudoers: Permission denied\n",
@@ -433,7 +344,7 @@ func TestCommandRun(t *testing.T) {
 			{
 				title:   "With opened stdout pipe",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output\"`},
 				prepareFunc: func(c *SSHCommand) error {
 					return c.Run(context.Background())
 				},
@@ -443,7 +354,7 @@ func TestCommandRun(t *testing.T) {
 			{
 				title:   "With nil session",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output"`},
 				prepareFunc: func(c *SSHCommand) error {
 					err := c.session.Close()
 					c.session = nil
@@ -465,12 +376,15 @@ func TestCommandRun(t *testing.T) {
 				if cancel != nil {
 					defer cancel()
 				}
-				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient := NewClient(ctx, sshSettings, settings, keys).
+				sshSettings := sshtesting.CreateDefaultTestSettings(test)
+				sshClient := NewClient(ctx, sshSettings, sess, keys).
 					WithLoopsParams(newSessionTestLoopParams())
-				err = sshClient.Start()
+				err := sshClient.Start()
 				// expecting no error on client start
 				require.NoError(t, err)
+
+				registerStopClient(t, sshClient)
+
 				cmd := NewSSHCommand(sshClient, c.command, c.args...)
 				if c.prepareFunc != nil {
 					err = c.prepareFunc(cmd)
@@ -511,49 +425,21 @@ func TestCommandRun(t *testing.T) {
 }
 
 func TestCommandStart(t *testing.T) {
-	testName := "TestCommandStart"
+	test := sshtesting.ShouldNewTest(t, "TestCommandStart")
 
-	sshtesting.CheckSkipSSHTest(t, testName)
+	container := sshtesting.NewTestContainerWrapper(t, test)
+	sess := sshtesting.Session(container)
+	keys := container.AgentPrivateKeys()
 
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
-
-	// genetaring ssh keys
-	path, publicKey, err := sshtesting.GenerateKeys("")
-	if err != nil {
-		return
-	}
-
-	// starting openssh container without password auth
-	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
-		PublicKey:  publicKey,
-		Username:   "user",
-		LocalPort:  20029,
-		SudoAccess: true,
-	}, testName)
-	require.NoError(t, err)
-
-	err = container.Start()
-	require.NoError(t, err)
-
-	os.Setenv("SSH_AUTH_SOCK", "")
-
-	settings := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20029"})
-	keys := []session.AgentPrivateKey{{Key: path}}
 	ctx := context.Background()
-	sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-	sshClient := NewClient(ctx, sshSettings, settings, keys).
+	sshSettings := sshtesting.CreateDefaultTestSettings(test)
+	sshClient := NewClient(ctx, sshSettings, sess, keys).
 		WithLoopsParams(newSessionTestLoopParams())
-	err = sshClient.Start()
+	err := sshClient.Start()
 	// expecting no error on client start
 	require.NoError(t, err)
 
-	t.Cleanup(func() {
-		sshClient.Stop()
-		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
-	})
+	registerStopClient(t, sshClient)
 
 	t.Run("Start and stop a command", func(t *testing.T) {
 		cases := []struct {
@@ -570,13 +456,13 @@ func TestCommandStart(t *testing.T) {
 			{
 				title:          "Just echo, success",
 				command:        "echo",
-				args:           []string{"\"test output\""},
+				args:           []string{`"test output"`},
 				expectedOutput: "test output\n",
 				wantErr:        false,
 			},
 			{
 				title:          "With context",
-				command:        "while true; do echo \"test\"; sleep 5; done",
+				command:        `while true; do echo "test"; sleep 5; done`,
 				args:           []string{},
 				expectedOutput: "test\ntest\n",
 				timeout:        7 * time.Second,
@@ -585,7 +471,7 @@ func TestCommandStart(t *testing.T) {
 			{
 				title:             "Command return error",
 				command:           "cat",
-				args:              []string{"\"/etc/sudoers\""},
+				args:              []string{`"/etc/sudoers"`},
 				wantErr:           true,
 				err:               "Process exited with status 1",
 				expectedErrOutput: "cat: /etc/sudoers: Permission denied\n",
@@ -593,7 +479,7 @@ func TestCommandStart(t *testing.T) {
 			{
 				title:   "With opened stdout pipe",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output"`},
 				prepareFunc: func(c *SSHCommand) error {
 					return c.Run(context.Background())
 				},
@@ -603,7 +489,7 @@ func TestCommandStart(t *testing.T) {
 			{
 				title:   "With nil session",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output"`},
 				prepareFunc: func(c *SSHCommand) error {
 					err := c.session.Close()
 					c.session = nil
@@ -615,14 +501,14 @@ func TestCommandStart(t *testing.T) {
 			{
 				title:   "waitHandler",
 				command: "echo",
-				args:    []string{"\"test output\""},
+				args:    []string{`"test output"`},
 				prepareFunc: func(c *SSHCommand) error {
 					c.WithWaitHandler(func(err error) {
 						if err != nil {
-							logger.ErrorF("SSH-agent process exited, now stop. Wait error: %v", err)
+							test.Logger.ErrorF("SSH-agent process exited, now stop. Wait error: %v", err)
 							return
 						}
-						logger.InfoF("SSH-agent process exited, now stop")
+						test.Logger.InfoF("SSH-agent process exited, now stop")
 					})
 					return nil
 				},
@@ -657,71 +543,25 @@ func TestCommandStart(t *testing.T) {
 }
 
 func TestCommandSudoRun(t *testing.T) {
-	testName := "TestCommandSudoRun"
+	test := sshtesting.ShouldNewTest(t, "TestCommandRunSudo")
 
-	sshtesting.CheckSkipSSHTest(t, testName)
-
-	logger := log.NewSimpleLogger(log.LoggerOptions{})
-
-	// genetaring ssh keys
-	path, publicKey, err := sshtesting.GenerateKeys("")
-	if err != nil {
-		return
-	}
-
-	// starting openssh container without password auth
-	container, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
-		PublicKey:  publicKey,
-		Username:   "user",
-		LocalPort:  20030,
-		SudoAccess: true,
-	}, testName)
-	require.NoError(t, err)
-
-	err = container.Start()
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		sshtesting.StopContainerAndRemoveKeys(t, container, logger, path)
-	})
+	container := sshtesting.NewTestContainerWrapper(t, test, sshtesting.WithNoPassword())
+	keys := container.AgentPrivateKeys()
 
 	// starting openssh container with password auth
-	containerWithPass, err := sshtesting.NewSSHContainer(sshtesting.ContainerSettings{
-		PublicKey:  publicKey,
-		Username:   "user",
-		LocalPort:  20031,
-		SudoAccess: true,
-		Password:   "VeryStrongPasswordWhatCannotBeGuessed",
-	}, testName)
-	require.NoError(t, err)
+	containerWithPass := sshtesting.NewTestContainerWrapper(
+		t,
+		test,
+		sshtesting.WithPassword(sshtesting.RandPassword(12)),
+	)
 
-	err = containerWithPass.Start()
-	require.NoError(t, err)
+	sessionWithoutPassword := sshtesting.Session(container)
 
-	os.Setenv("SSH_AUTH_SOCK", "")
-
-	settings := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20030"})
-	keys := []session.AgentPrivateKey{{Key: path}}
-	settings2 := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20031",
-		BecomePass:     "VeryStrongPasswordWhatCannotBeGuessed",
-	})
+	sessionWithValidPass := sshtesting.Session(containerWithPass)
 
 	// client with wrong sudo password
-	settings3 := session.NewSession(session.Input{
-		AvailableHosts: []session.Host{{Host: "localhost", Name: "localhost"}},
-		User:           "user",
-		Port:           "20031",
-		BecomePass:     "WrongPassword",
-	})
-
-	t.Cleanup(func() {
-		sshtesting.StopContainerAndRemoveKeys(t, containerWithPass, logger)
+	sessionWithInvalidPass := sshtesting.Session(containerWithPass, func(input *session.Input) {
+		input.BecomePass = sshtesting.RandPassword(3)
 	})
 
 	t.Run("Run a command with sudo", func(t *testing.T) {
@@ -739,35 +579,35 @@ func TestCommandSudoRun(t *testing.T) {
 		}{
 			{
 				title:    "Just echo, success",
-				settings: settings,
+				settings: sessionWithoutPassword,
 				keys:     keys,
 				command:  "echo",
-				args:     []string{"\"test output\""},
+				args:     []string{`"test output"`},
 				wantErr:  false,
 			},
 			{
 				title:    "Just echo, success, with password",
-				settings: settings2,
+				settings: sessionWithValidPass,
 				keys:     make([]session.AgentPrivateKey, 0, 1),
 				command:  "echo",
-				args:     []string{"\"test output\""},
+				args:     []string{`"test output"`},
 				wantErr:  false,
 			},
 			{
 				title:       "Just echo, failure, with wrong password",
-				settings:    settings3,
+				settings:    sessionWithInvalidPass,
 				keys:        keys,
 				command:     "echo",
-				args:        []string{"\"test output\""},
+				args:        []string{`"test output"`},
 				wantErr:     true,
 				err:         "Process exited with status 1",
 				errorOutput: "SudoPasswordSorry, try again.\nSudoPasswordSorry, try again.\nSudoPasswordsudo: 3 incorrect password attempts\n",
 			},
 			{
 				title:    "With context",
-				settings: settings,
+				settings: sessionWithoutPassword,
 				keys:     keys,
-				command:  "while true; do echo \"test\"; sleep 5; done",
+				command:  `while true; do echo "test"; sleep 5; done`,
 				args:     []string{},
 				timeout:  7 * time.Second,
 				wantErr:  false,
@@ -785,11 +625,16 @@ func TestCommandSudoRun(t *testing.T) {
 				if cancel != nil {
 					defer cancel()
 				}
-				sshSettings, _ := sshtesting.CreateDefaultTestSettings()
-				sshClient := NewClient(ctx, sshSettings, c.settings, c.keys).WithLoopsParams(newSessionTestLoopParams())
-				err = sshClient.Start()
+				sshSettings := sshtesting.CreateDefaultTestSettings(test)
+				sshClient := NewClient(ctx, sshSettings, c.settings, c.keys).
+					WithLoopsParams(newSessionTestLoopParams())
+
+				err := sshClient.Start()
 				// expecting no error on client start
 				require.NoError(t, err)
+
+				registerStopClient(t, sshClient)
+
 				cmd := NewSSHCommand(sshClient, c.command, c.args...).CaptureStderr(nil)
 				if c.prepareFunc != nil {
 					err = c.prepareFunc(cmd)
@@ -806,7 +651,6 @@ func TestCommandSudoRun(t *testing.T) {
 
 					require.Contains(t, string(errBytes), c.errorOutput)
 				}
-				sshClient.Stop()
 			})
 		}
 	})

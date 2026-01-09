@@ -18,11 +18,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"encoding/pem"
 	"fmt"
 	"io"
-	mathrand "math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -38,11 +36,12 @@ import (
 )
 
 // helper func to generate SSH keys
-func GenerateKeys(passphrase string) (string, string, error) {
+func GenerateKeys(tmpDir string, passphrase string) (string, string, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return "", "", err
 	}
+
 	var privateKeyPem *pem.Block
 	if len(passphrase) == 0 {
 		privateKeyPem, err = gossh.MarshalPrivateKey(privateKey, "")
@@ -60,11 +59,14 @@ func GenerateKeys(passphrase string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	file, err := os.CreateTemp(os.TempDir(), "key")
+
+	file, err := os.CreateTemp(tmpDir, fmt.Sprintf("private-key.%s", GenerateID("privatekey")))
 	if err != nil {
 		return "", "", err
 	}
+
 	pemBytes := pem.EncodeToMemory(privateKeyPem)
+
 	_, err = io.Copy(file, bytes.NewReader(pemBytes))
 	if err != nil {
 		return "", "", err
@@ -210,26 +212,6 @@ func StartWebServer(port string) error {
 	return nil
 }
 
-func randRange(min, max int) int {
-	rnd := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
-	return rnd.Intn(max-min) + min
-}
-
-func testID(name string) string {
-	rndID := mathrand.New(mathrand.NewSource(time.Now().UnixNano())).Int()
-	sumString := fmt.Sprintf("%s/%d", name, rndID)
-	sum := sha256Encode(sumString)
-	return fmt.Sprintf("%.12s", sum)
-}
-
-func sha256Encode(input string) string {
-	hasher := sha256.New()
-
-	hasher.Write([]byte(input))
-
-	return fmt.Sprintf("%x", hasher.Sum(nil))
-}
-
 func AddSSHKeyToAgent(t *testing.T, path string) string {
 	authSock := os.Getenv("SSH_AUTH_SOCK")
 	if authSock == "" {
@@ -257,21 +239,13 @@ func LogErrorOrAssert(t *testing.T, description string, err error, logger log.Lo
 	logger.ErrorF("%s: %v", description, err)
 }
 
-func RemoveSSHKeyFromAgent(t *testing.T, path string, logger log.Logger) {
-	authSock := os.Getenv("SSH_AUTH_SOCK")
-	if authSock == "" {
-		return
+func StopContainerAndRemoveKeys(t *testing.T, container *SSHContainer, logger log.Logger, keyPaths ...string) {
+	var containerStopError, removeSSHDConfigError error
+	if !govalue.Nil(container) {
+		containerStopError = container.Stop()
+		removeSSHDConfigError = container.RemoveSSHDConfig()
 	}
 
-	cmd := exec.Command("ssh-add", "-d", path)
-	err := cmd.Run()
-
-	LogErrorOrAssert(t, fmt.Sprintf("failed to remove key '%s' from agent", path), err, logger)
-}
-
-func StopContainerAndRemoveKeys(t *testing.T, container *SSHContainer, logger log.Logger, keyPaths ...string) {
-	containerStopError := container.Stop()
-	removeSSHDConfigError := container.RemoveSSHDConfig()
 	removeErrors := removeFiles(keyPaths...)
 
 	LogErrorOrAssert(t, "failed to stop container", containerStopError, logger)
@@ -291,7 +265,7 @@ func RemoveFiles(t *testing.T, logger log.Logger, paths ...string) {
 
 func CheckSkipSSHTest(t *testing.T, testName string) {
 	if os.Getenv("SKIP_GOSSH_TEST") == "true" {
-		t.Skipf("Skipping %s test", testName)
+		t.Skipf("Skipping %s test. SKIP_GOSSH_TEST=true env passed", testName)
 	}
 }
 
@@ -305,8 +279,24 @@ func GetTestLoopParamsForFailed() retry.Params {
 func removeFiles(paths ...string) []error {
 	removeErrors := make([]error, 0, len(paths))
 	for _, path := range paths {
-		err := os.Remove(path)
-		if err != nil && !os.IsNotExist(err) {
+		if path == "" {
+			continue
+		}
+
+		stat, err := os.Stat(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				removeErrors = append(removeErrors, fmt.Errorf("cannot stat %s: %w", path, err))
+			}
+			continue
+		}
+
+		remove := os.Remove
+		if stat.IsDir() {
+			remove = os.RemoveAll
+		}
+
+		if err := remove(path); err != nil && !os.IsNotExist(err) {
 			removeErrors = append(removeErrors, err)
 		}
 	}
